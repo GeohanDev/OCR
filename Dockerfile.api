@@ -1,0 +1,43 @@
+# Stage 1 — build
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+# Copy solution and project files first (layer cache for restore)
+COPY OcrErpSystem.sln ./
+COPY src/OcrErpSystem.Common/OcrErpSystem.Common.csproj             src/OcrErpSystem.Common/
+COPY src/OcrErpSystem.Domain/OcrErpSystem.Domain.csproj             src/OcrErpSystem.Domain/
+COPY src/OcrErpSystem.Application/OcrErpSystem.Application.csproj   src/OcrErpSystem.Application/
+COPY src/OcrErpSystem.OCR/OcrErpSystem.OCR.csproj                   src/OcrErpSystem.OCR/
+COPY src/OcrErpSystem.Infrastructure/OcrErpSystem.Infrastructure.csproj src/OcrErpSystem.Infrastructure/
+COPY src/OcrErpSystem.API/OcrErpSystem.API.csproj                   src/OcrErpSystem.API/
+
+RUN dotnet restore src/OcrErpSystem.API/OcrErpSystem.API.csproj
+
+COPY src/ src/
+RUN dotnet publish src/OcrErpSystem.API/OcrErpSystem.API.csproj \
+    -c Release -o /app/publish --no-restore
+
+# Stage 2 — runtime
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+WORKDIR /app
+
+# Install Tesseract runtime and English language data
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libtesseract-dev \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /app/publish .
+
+# Create directories for local file storage and Tesseract data
+RUN mkdir -p /data/documents /data/tessdata && \
+    cp /usr/share/tesseract-ocr/5/tessdata/eng.traineddata /data/tessdata/ 2>/dev/null || true
+
+ENV ASPNETCORE_URLS=http://+:8080
+ENV Tesseract__DataPath=/data/tessdata
+ENV Storage__Type=local
+ENV Storage__LocalPath=/data/documents
+
+EXPOSE 8080
+ENTRYPOINT ["dotnet", "OcrErpSystem.API.dll"]

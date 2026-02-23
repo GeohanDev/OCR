@@ -1,0 +1,6 @@
+@OcrErpSystem.API_HostAddress = http://localhost:5101
+
+GET {{OcrErpSystem.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

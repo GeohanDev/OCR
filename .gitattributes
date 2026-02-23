@@ -1,0 +1,25 @@
+# Normalize line endings to LF in the repository
+* text=auto eol=lf
+
+# Force LF for source files
+*.cs    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.conf  text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.csproj text eol=lf
+*.sln   text eol=lf
+Dockerfile* text eol=lf
+
+# Binary files — never touch line endings
+*.png   binary
+*.jpg   binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary

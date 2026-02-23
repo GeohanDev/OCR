@@ -1,0 +1,76 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ocrerp
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d ocrerp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── API (ASP.NET Core 8) ──────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=ocrerp;Username=app;Password=${DB_PASSWORD}"
+      Jwt__Authority: ${ACUMATICA_URL}/identity
+      Jwt__Audience: ${JWT_AUDIENCE}
+      Acumatica__BaseUrl: ${ACUMATICA_URL}
+      Acumatica__ApiVersion: ${ACUMATICA_API_VERSION:-23.200.001}
+      Acumatica__ServiceAccount__ClientId: ${ACUMATICA_CLIENT_ID}
+      Acumatica__ServiceAccount__ClientSecret: ${ACUMATICA_CLIENT_SECRET}
+      Storage__Type: local
+      Storage__LocalPath: /data/documents
+      Storage__BaseUrl: ${API_BASE_URL:-http://localhost:5000}
+      Storage__SigningKey: ${STORAGE_SIGNING_KEY}
+      Tesseract__DataPath: /data/tessdata
+      Tesseract__Language: eng
+      AllowedOrigins__0: ${FRONTEND_URL:-http://localhost:3000}
+      Hangfire__DashboardUser: ${HANGFIRE_USER:-admin}
+      Hangfire__DashboardPassword: ${HANGFIRE_PASSWORD}
+    volumes:
+      - document_storage:/data/documents
+      - tessdata:/data/tessdata
+    ports:
+      - "5000:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Frontend (React + nginx) ──────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ""            # empty = same-origin via nginx proxy
+        VITE_ACUMATICA_URL: ${ACUMATICA_URL}
+        VITE_ACUMATICA_CLIENT_ID: ${ACUMATICA_CLIENT_ID}
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "3000:80"
+
+volumes:
+  pg_data:
+  document_storage:
+  tessdata:
