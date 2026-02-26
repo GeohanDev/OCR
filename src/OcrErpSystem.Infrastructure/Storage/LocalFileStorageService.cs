@@ -9,11 +9,13 @@ public class LocalFileStorageService : IFileStorageService
 {
     private readonly string _basePath;
     private readonly string _baseUrl;
+    private readonly string _signingKey;
 
     public LocalFileStorageService(IConfiguration config)
     {
         _basePath = config["Storage:LocalPath"] ?? Path.Combine(Directory.GetCurrentDirectory(), "data", "documents");
         _baseUrl = config["Storage:BaseUrl"] ?? "http://localhost:5000/files";
+        _signingKey = config["Storage:SigningKey"] ?? "signed-url-secret";
         Directory.CreateDirectory(_basePath);
     }
 
@@ -50,7 +52,7 @@ public class LocalFileStorageService : IFileStorageService
     {
         var expiryUnix = DateTimeOffset.UtcNow.Add(expiry).ToUnixTimeSeconds();
         var token = Convert.ToBase64String(
-            SHA256.HashData(Encoding.UTF8.GetBytes($"{storagePath}:{expiryUnix}:signed-url-secret")));
+            SHA256.HashData(Encoding.UTF8.GetBytes($"{storagePath}:{expiryUnix}:{_signingKey}")));
         var encodedPath = Uri.EscapeDataString(storagePath);
         var encodedToken = Uri.EscapeDataString(token);
         return Task.FromResult($"{_baseUrl}/{encodedPath}?expires={expiryUnix}&token={encodedToken}");

@@ -1,10 +1,12 @@
 using System.Threading.RateLimiting;
 using Hangfire;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using OcrErpSystem.API.Extensions;
 using OcrErpSystem.API.Middleware;
 using OcrErpSystem.Application.Auth;
+using OcrErpSystem.Application.Storage;
 using OcrErpSystem.Infrastructure.Persistence;
 using Serilog;
 
@@ -58,6 +60,45 @@ app.UseAuthentication();                     // validates JWT, sets HttpContext.
 app.UseMiddleware<AcumaticaJwtMiddleware>(); // reads HttpContext.User claims → enriches ICurrentUserContext
 app.UseAuthorization();                      // enforces [Authorize] policies
 app.MapControllers();
+
+// Serve stored document files — signed-URL authentication (no JWT required)
+app.MapGet("/files/{**storagePath}", async (
+    string storagePath,
+    [FromQuery] long expires,
+    [FromQuery] string? token,
+    IFileStorageService storage,
+    IConfiguration config) =>
+{
+    if (string.IsNullOrWhiteSpace(token) || DateTimeOffset.UtcNow.ToUnixTimeSeconds() > expires)
+        return Results.Problem("URL expired or invalid.", statusCode: 403);
+
+    var signingKey = config["Storage:SigningKey"] ?? "signed-url-secret";
+    var expected = Convert.ToBase64String(
+        System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes($"{storagePath}:{expires}:{signingKey}")));
+
+    if (!string.Equals(token, expected, StringComparison.Ordinal))
+        return Results.Problem("Invalid token.", statusCode: 403);
+
+    try
+    {
+        var stream = await storage.ReadAsync(storagePath);
+        var ext = Path.GetExtension(storagePath).ToLowerInvariant();
+        var mime = ext switch
+        {
+            ".pdf"  => "application/pdf",
+            ".png"  => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".tif" or ".tiff" => "image/tiff",
+            _       => "application/octet-stream",
+        };
+        return Results.Stream(stream, contentType: mime, enableRangeProcessing: true);
+    }
+    catch (FileNotFoundException)
+    {
+        return Results.NotFound("File not found.");
+    }
+});
 
 app.UseHangfireDashboard("/hangfire", new DashboardOptions
 {

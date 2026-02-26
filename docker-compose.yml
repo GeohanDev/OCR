@@ -43,7 +43,7 @@ services:
       Acumatica__ClientAssertion__QI: ${ACUMATICA_CA_QI}
       Storage__Type: local
       Storage__LocalPath: /data/documents
-      Storage__BaseUrl: ${API_BASE_URL:-http://localhost:5000}
+      Storage__BaseUrl: ${API_BASE_URL:-http://localhost:5000}/files
       Storage__SigningKey: ${STORAGE_SIGNING_KEY}
       Tesseract__DataPath: /data/tessdata
       Tesseract__Language: eng

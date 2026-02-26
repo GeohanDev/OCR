@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { documentApi, configApi } from '../api/client';
 import type { DocumentType } from '../types';
 import { Upload, X, CheckCircle, AlertCircle, FileText, Loader2 } from 'lucide-react';
@@ -19,6 +19,7 @@ interface FileEntry {
 
 export default function UploadPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [selectedType, setSelectedType] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -78,6 +79,7 @@ export default function UploadPage() {
       }
     }
     setIsUploading(false);
+    queryClient.invalidateQueries({ queryKey: ['documents'] });
   };
 
   const allDone = files.length > 0 && files.every(f => f.status === 'done');

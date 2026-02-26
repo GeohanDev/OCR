@@ -1,7 +1,11 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
+using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.IdentityModel.Tokens;
 using OcrErpSystem.Application.DTOs;
 using OcrErpSystem.Application.ERP;
 
@@ -34,23 +38,24 @@ public class AcumaticaClient : IErpIntegrationService
             if (_serviceAccountToken is not null && DateTimeOffset.UtcNow < _tokenExpiry.AddMinutes(-5))
                 return _serviceAccountToken;
 
-            var clientId = _config["Acumatica:ServiceAccount:ClientId"]
-                ?? throw new InvalidOperationException("Acumatica:ServiceAccount:ClientId not configured");
-            var clientSecret = _config["Acumatica:ServiceAccount:ClientSecret"]
-                ?? throw new InvalidOperationException("Acumatica:ServiceAccount:ClientSecret not configured");
+            var clientId      = _config["Acumatica:ServiceAccount:ClientId"]
+                                ?? throw new InvalidOperationException("Acumatica:ServiceAccount:ClientId not configured");
+            var tokenEndpoint = $"{BaseUrl}/identity/connect/token";
 
-            var request = new HttpRequestMessage(HttpMethod.Post, $"{BaseUrl}/identity/connect/token");
+            var request = new HttpRequestMessage(HttpMethod.Post, tokenEndpoint);
             request.Content = new FormUrlEncodedContent(new Dictionary<string, string>
             {
-                ["grant_type"] = "client_credentials",
-                ["client_id"] = clientId,
-                ["client_secret"] = clientSecret
+                ["grant_type"]            = "client_credentials",
+                ["client_id"]             = clientId,
+                ["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                ["client_assertion"]      = BuildServiceAssertion(clientId, tokenEndpoint),
+                ["scope"]                 = "api",
             });
 
             var response = await _http.SendAsync(request, ct);
             response.EnsureSuccessStatusCode();
             var json = await response.Content.ReadAsStringAsync(ct);
-            var doc = JsonDocument.Parse(json);
+            var doc  = JsonDocument.Parse(json);
             _serviceAccountToken = doc.RootElement.GetProperty("access_token").GetString()!;
             var expiresIn = doc.RootElement.GetProperty("expires_in").GetInt32();
             _tokenExpiry = DateTimeOffset.UtcNow.AddSeconds(expiresIn);
@@ -60,6 +65,38 @@ public class AcumaticaClient : IErpIntegrationService
         {
             _tokenLock.Release();
         }
+    }
+
+    private string BuildServiceAssertion(string clientId, string tokenEndpoint)
+    {
+        var rsa = RSA.Create();
+        rsa.ImportParameters(new RSAParameters
+        {
+            Modulus  = Base64UrlEncoder.DecodeBytes(_config["Acumatica:ClientAssertion:N"]!),
+            Exponent = Base64UrlEncoder.DecodeBytes(_config["Acumatica:ClientAssertion:E"]!),
+            D        = Base64UrlEncoder.DecodeBytes(_config["Acumatica:ClientAssertion:D"]!),
+            P        = Base64UrlEncoder.DecodeBytes(_config["Acumatica:ClientAssertion:P"]!),
+            Q        = Base64UrlEncoder.DecodeBytes(_config["Acumatica:ClientAssertion:Q"]!),
+            DP       = Base64UrlEncoder.DecodeBytes(_config["Acumatica:ClientAssertion:DP"]!),
+            DQ       = Base64UrlEncoder.DecodeBytes(_config["Acumatica:ClientAssertion:DQ"]!),
+            InverseQ = Base64UrlEncoder.DecodeBytes(_config["Acumatica:ClientAssertion:QI"]!),
+        });
+
+        var now   = DateTime.UtcNow;
+        var creds = new SigningCredentials(new RsaSecurityKey(rsa), SecurityAlgorithms.RsaSha256);
+        var assertion = new JwtSecurityToken(
+            claims: new[]
+            {
+                new Claim("iss", clientId),
+                new Claim("sub", clientId),
+                new Claim("aud", tokenEndpoint),
+                new Claim("jti", Guid.NewGuid().ToString()),
+                new Claim("iat", new DateTimeOffset(now).ToUnixTimeSeconds().ToString(),
+                          ClaimValueTypes.Integer64),
+            },
+            notBefore: now, expires: now.AddMinutes(5), signingCredentials: creds);
+
+        return new JwtSecurityTokenHandler().WriteToken(assertion);
     }
 
     private async Task SetAuthHeaderAsync(CancellationToken ct)

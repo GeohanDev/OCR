@@ -22,6 +22,7 @@ export default function DocumentDetailPage() {
     queryKey: ['document', id],
     queryFn: () => documentApi.getById(id!).then(r => r.data),
     enabled: !!id,
+    refetchInterval: (query) => query.state.data?.status === 'Processing' ? 3000 : false,
   });
 
   const { data: ocrResult } = useQuery<OcrResult>({
@@ -160,6 +161,12 @@ export default function DocumentDetailPage() {
       {approve.error && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
           {(approve.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Approval failed'}
+        </div>
+      )}
+
+      {triggerOcr.isError && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
+          OCR processing failed. Check that the document is a valid PDF, PNG, or TIFF and try again.
         </div>
       )}
 
