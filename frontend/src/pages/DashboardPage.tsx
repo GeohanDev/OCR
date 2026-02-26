@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { dashboardApi } from '../api/client';
 import StatusBadge from '../components/ui/StatusBadge';
-import { FileText, Clock, CheckCircle, XCircle, Send } from 'lucide-react';
+import { FileText, Clock, CheckCircle, Send } from 'lucide-react';
 import type { DashboardKpis } from '../types';
 import { Link } from 'react-router-dom';
 
@@ -22,15 +22,16 @@ function KpiCard({ label, value, icon: Icon, color }: {
 }
 
 export default function DashboardPage() {
-  const { data, isLoading } = useQuery<DashboardKpis>({
+  const { data, isLoading, isError } = useQuery<DashboardKpis>({
     queryKey: ['dashboard-kpis'],
     queryFn: () => dashboardApi.getKpis().then(r => r.data),
     refetchInterval: 30000,
   });
 
   if (isLoading) return <div className="text-center py-12 text-gray-500">Loading dashboard...</div>;
+  if (isError || !data) return <div className="text-center py-12 text-gray-400">Could not load dashboard data.</div>;
 
-  const kpis = data!;
+  const kpis = data;
 
   return (
     <div className="space-y-6">

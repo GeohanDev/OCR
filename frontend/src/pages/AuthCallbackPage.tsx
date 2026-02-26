@@ -1,10 +1,9 @@
 import { useEffect, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { apiClient } from '../api/client';
 
 export default function AuthCallbackPage() {
-  const [searchParams] = useSearchParams();
   const { login } = useAuth();
   const navigate = useNavigate();
   const handled = useRef(false);
@@ -13,19 +12,21 @@ export default function AuthCallbackPage() {
     if (handled.current) return;
     handled.current = true;
 
-    const code = searchParams.get('code');
+    const code = new URLSearchParams(window.location.search).get('code');
     if (!code) {
       navigate('/login', { replace: true });
       return;
     }
 
-    apiClient.post('/auth/callback', { code, redirectUri: `${window.location.origin}/auth/callback` })
+    apiClient
+      .post('/auth/callback', { code, redirectUri: `${window.location.origin}/auth/callback` })
       .then(async (res) => {
         await login(res.data.accessToken);
         navigate('/dashboard', { replace: true });
       })
-      .catch(() => {
-        navigate('/login?error=auth_failed', { replace: true });
+      .catch((err) => {
+        const errorCode: string = err.response?.data?.error ?? 'auth_failed';
+        navigate(`/login?error=${encodeURIComponent(errorCode)}`, { replace: true });
       });
   }, []);
 

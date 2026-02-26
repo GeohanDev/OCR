@@ -49,12 +49,14 @@ using (var scope = app.Services.CreateScope())
     db.Database.Migrate();
 }
 
+app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
+
 app.UseSerilogRequestLogging();
 app.UseCors();
 app.UseRateLimiter();
-app.UseAuthentication();
-app.UseMiddleware<AcumaticaJwtMiddleware>();
-app.UseAuthorization();
+app.UseAuthentication();                     // validates JWT, sets HttpContext.User
+app.UseMiddleware<AcumaticaJwtMiddleware>(); // reads HttpContext.User claims → enriches ICurrentUserContext
+app.UseAuthorization();                      // enforces [Authorize] policies
 app.MapControllers();
 
 app.UseHangfireDashboard("/hangfire", new DashboardOptions

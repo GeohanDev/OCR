@@ -29,8 +29,8 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ConnectionStrings__Default: "Host=db;Port=5432;Database=ocrerp;Username=app;Password=${DB_PASSWORD}"
-      Jwt__Authority: ${ACUMATICA_URL}/identity
-      Jwt__Audience: ${JWT_AUDIENCE}
+      Acumatica__Authority: ${ACUMATICA_URL}/identity
+      Acumatica__Audience: ${JWT_AUDIENCE}
       Acumatica__BaseUrl: ${ACUMATICA_URL}
       Acumatica__ApiVersion: ${ACUMATICA_API_VERSION:-23.200.001}
       Acumatica__ServiceAccount__ClientId: ${ACUMATICA_CLIENT_ID}
@@ -44,6 +44,8 @@ services:
       AllowedOrigins__0: ${FRONTEND_URL:-http://localhost:3000}
       Hangfire__DashboardUser: ${HANGFIRE_USER:-admin}
       Hangfire__DashboardPassword: ${HANGFIRE_PASSWORD}
+      Demo__Enabled: ${DEMO_ENABLED:-false}
+      Demo__SigningKey: ${DEMO_SIGNING_KEY}
     volumes:
       - document_storage:/data/documents
       - tessdata:/data/tessdata

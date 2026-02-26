@@ -1,7 +1,11 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Cryptography;
+using System.Text;
 using Hangfire;
 using Hangfire.PostgreSql;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 using OcrErpSystem.Application.Audit;
 using OcrErpSystem.Application.Auth;
 using OcrErpSystem.Application.Config;
@@ -92,34 +96,127 @@ public static class ServiceCollectionExtensions
 
     public static IServiceCollection AddJwtAuthentication(this IServiceCollection services, IConfiguration config)
     {
-        services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-            .AddJwtBearer(options =>
+        var authority = config["Acumatica:Authority"] ?? string.Empty;
+        var rsaN      = config["Acumatica:SigningKey:N"] ?? string.Empty;
+        var rsaE      = config["Acumatica:SigningKey:E"] ?? string.Empty;
+        var demoKey   = config["Demo:SigningKey"] ?? string.Empty;
+
+        // ── Routing: inspect the alg header so each token reaches its correct scheme ──
+        // RS256  → "Acumatica" scheme  (Acumatica Identity Server, public-key validation)
+        // HS256  → "Demo"      scheme  (demo-login tokens, symmetric key)
+        services.AddAuthentication(options =>
+        {
+            options.DefaultAuthenticateScheme = "SmartBearer";
+            options.DefaultChallengeScheme    = "SmartBearer";
+        })
+        .AddPolicyScheme("SmartBearer", "Acumatica or Demo JWT", options =>
+        {
+            options.ForwardDefaultSelector = ctx =>
             {
-                options.Authority = config["Acumatica:Authority"];
-                options.Audience = config["Acumatica:Audience"];
-                options.TokenValidationParameters = new Microsoft.IdentityModel.Tokens.TokenValidationParameters
+                var header = ctx.Request.Headers.Authorization.FirstOrDefault() ?? string.Empty;
+                if (header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var handler = new JwtSecurityTokenHandler();
+                        var raw     = header["Bearer ".Length..].Trim();
+                        if (handler.CanReadToken(raw))
+                        {
+                            var alg = handler.ReadJwtToken(raw).Header.Alg;
+                            if (string.Equals(alg, SecurityAlgorithms.HmacSha256,
+                                    StringComparison.OrdinalIgnoreCase))
+                                return "Demo";
+                        }
+                    }
+                    catch { /* fall through to Acumatica */ }
+                }
+                return "Acumatica";
+            };
+        })
+
+        // ── Acumatica scheme: RS256 tokens from Acumatica Identity Server ─────────────
+        // Primary path  → Authority is set, OIDC discovery fetches the JWKS automatically.
+        // Fallback path → Authority is empty, use the hardcoded RSA public key (N + E).
+        .AddJwtBearer("Acumatica", options =>
+        {
+            if (!string.IsNullOrWhiteSpace(authority))
+            {
+                // Automatic JWKS discovery — handles key rotation without code changes.
+                // Setting Authority causes the middleware to fetch the OIDC discovery document
+                // and populate ValidIssuer + IssuerSigningKeys automatically; do NOT set
+                // ValidIssuer manually here or it may conflict with the discovered value.
+                options.Authority            = authority;
+                options.RequireHttpsMetadata = authority.StartsWith("https://",
+                                                   StringComparison.OrdinalIgnoreCase);
+                options.TokenValidationParameters = new TokenValidationParameters
                 {
                     ValidateIssuerSigningKey = true,
-                    ValidateIssuer = !string.IsNullOrWhiteSpace(config["Acumatica:Authority"]),
-                    ValidateAudience = !string.IsNullOrWhiteSpace(config["Acumatica:Audience"]),
-                    ValidateLifetime = true,
-                    ClockSkew = TimeSpan.FromMinutes(5)
+                    ValidateIssuer           = true,   // issuer read from discovery document
+                    ValidateAudience         = false,
+                    ValidateLifetime         = true,
+                    ClockSkew                = TimeSpan.FromMinutes(5),
                 };
-                options.Events = new JwtBearerEvents
+            }
+            else if (!string.IsNullOrWhiteSpace(rsaN) && !string.IsNullOrWhiteSpace(rsaE))
+            {
+                // Fallback: hardcoded RSA public key (e.g. for offline dev).
+                var rsa = RSA.Create();
+                rsa.ImportParameters(new RSAParameters
                 {
-                    OnMessageReceived = ctx =>
-                    {
-                        if (ctx.Request.Cookies.ContainsKey("jwt"))
-                            ctx.Token = ctx.Request.Cookies["jwt"];
-                        return Task.CompletedTask;
-                    }
+                    Modulus  = Base64UrlEncoder.DecodeBytes(rsaN),
+                    Exponent = Base64UrlEncoder.DecodeBytes(rsaE),
+                });
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuerSigningKey = true,
+                    ValidateIssuer           = false,
+                    ValidateAudience         = false,
+                    ValidateLifetime         = true,
+                    ClockSkew                = TimeSpan.FromMinutes(5),
+                    IssuerSigningKey         = new RsaSecurityKey(rsa),
                 };
-            });
+            }
+
+            options.Events = new JwtBearerEvents
+            {
+                OnMessageReceived = ctx =>
+                {
+                    if (ctx.Request.Cookies.ContainsKey("jwt"))
+                        ctx.Token = ctx.Request.Cookies["jwt"];
+                    return Task.CompletedTask;
+                },
+            };
+        })
+
+        // ── Demo scheme: HS256 tokens issued by DemoLogin ────────────────────────────
+        .AddJwtBearer("Demo", options =>
+        {
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = !string.IsNullOrWhiteSpace(demoKey),
+                ValidateIssuer           = false,
+                ValidateAudience         = false,
+                ValidateLifetime         = true,
+                ClockSkew                = TimeSpan.FromMinutes(5),
+                IssuerSigningKey         = !string.IsNullOrWhiteSpace(demoKey)
+                    ? new SymmetricSecurityKey(Encoding.UTF8.GetBytes(demoKey))
+                    : null,
+            };
+            options.Events = new JwtBearerEvents
+            {
+                OnMessageReceived = ctx =>
+                {
+                    if (ctx.Request.Cookies.ContainsKey("jwt"))
+                        ctx.Token = ctx.Request.Cookies["jwt"];
+                    return Task.CompletedTask;
+                },
+            };
+        });
 
         services.AddAuthorization(opt =>
         {
             opt.AddPolicy("ManagerAndAbove", p => p.RequireRole("Manager", "Admin"));
-            opt.AddPolicy("AdminOnly", p => p.RequireRole("Admin"));
+            opt.AddPolicy("AdminOnly",        p => p.RequireRole("Admin"));
         });
 
         return services;

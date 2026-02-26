@@ -200,7 +200,7 @@ export default function DocumentDetailPage() {
           ) : (
             <dl className="space-y-2 text-sm">
               <Row label="Pages" value={String(ocrResult.pageCount)} />
-              <Row label="Overall confidence" value={`${(ocrResult.overallConfidence * 100).toFixed(1)}%`} />
+              <Row label="Overall confidence" value={`${((ocrResult.overallConfidence ?? 0) * 100).toFixed(1)}%`} />
               <Row label="Fields extracted" value={String(ocrResult.fields.length)} />
               <Row
                 label="Low confidence"

@@ -1,5 +1,3 @@
-import type { DocumentStatus } from '../../types';
-
 const statusConfig: Record<string, { label: string; classes: string }> = {
   Uploaded:       { label: 'Uploaded',       classes: 'bg-gray-100 text-gray-700' },
   Processing:     { label: 'Processing',     classes: 'bg-yellow-100 text-yellow-700 animate-pulse' },

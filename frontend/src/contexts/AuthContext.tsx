@@ -1,5 +1,5 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { apiClient } from '../api/client';
+import { createContext, useContext } from 'react';
+import type { ReactNode } from 'react';
 import type { User } from '../types';
 
 interface AuthContextValue {
@@ -14,49 +14,29 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+// Auth bypass: hardcoded admin user for UI browsing.
+// Replace this with the real OAuth implementation once Acumatica is configured.
+const BYPASS_USER: User = {
+  id: '00000000-0000-0000-0000-000000000001',
+  acumaticaUserId: 'bypass',
+  username: 'dev-admin',
+  displayName: 'Dev Admin',
+  email: 'dev@local',
+  role: 'Admin',
+  isActive: true,
+  createdAt: new Date().toISOString(),
+};
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (token) {
-      fetchCurrentUser();
-    } else {
-      setIsLoading(false);
-    }
-  }, []);
-
-  const fetchCurrentUser = async () => {
-    try {
-      const { data } = await apiClient.get('/auth/me');
-      setUser(data);
-    } catch {
-      localStorage.removeItem('access_token');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const login = async (token: string) => {
-    localStorage.setItem('access_token', token);
-    await fetchCurrentUser();
-  };
-
-  const logout = () => {
-    localStorage.removeItem('access_token');
-    setUser(null);
-  };
-
   return (
     <AuthContext.Provider value={{
-      user,
-      isLoading,
-      isAuthenticated: !!user,
-      login,
-      logout,
-      isManagerOrAbove: user?.role === 'Manager' || user?.role === 'Admin',
-      isAdmin: user?.role === 'Admin',
+      user: BYPASS_USER,
+      isLoading: false,
+      isAuthenticated: true,
+      login: async () => {},
+      logout: () => {},
+      isManagerOrAbove: true,
+      isAdmin: true,
     }}>
       {children}
     </AuthContext.Provider>
