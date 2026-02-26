@@ -128,21 +128,20 @@ public class AuthController : ControllerBase
         if (string.IsNullOrWhiteSpace(signingKey))
             return StatusCode(500, "Demo signing key not configured");
 
-        // Ensure demo admin user exists
+        // Ensure demo admin user exists and is active (sync jobs may deactivate it)
         var demoUser = await userRepo.GetByUsernameAsync("demo-admin", ct);
-        if (demoUser is null)
+        if (demoUser is null || !demoUser.IsActive)
         {
-            demoUser = new User
+            var upsert = new User
             {
                 AcumaticaUserId = "demo-admin",
-                Username = "demo-admin",
-                DisplayName = "Demo Admin",
-                Email = "demo@example.com",
-                Role = UserRole.Admin,
-                IsActive = true,
+                Username        = "demo-admin",
+                DisplayName     = "Demo Admin",
+                Email           = "demo@example.com",
+                Role            = UserRole.Admin,
+                IsActive        = true,
             };
-            await userRepo.UpsertAsync(demoUser, ct);
-            // Re-fetch to get the assigned Id
+            await userRepo.UpsertAsync(upsert, ct);
             demoUser = await userRepo.GetByUsernameAsync("demo-admin", ct);
         }
 

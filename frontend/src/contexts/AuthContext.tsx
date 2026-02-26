@@ -1,5 +1,6 @@
-import { createContext, useContext } from 'react';
+import { createContext, useContext, useState, useEffect } from 'react';
 import type { ReactNode } from 'react';
+import { apiClient } from '../api/client';
 import type { User } from '../types';
 
 interface AuthContextValue {
@@ -14,29 +15,78 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-// Auth bypass: hardcoded admin user for UI browsing.
-// Replace this with the real OAuth implementation once Acumatica is configured.
-const BYPASS_USER: User = {
-  id: '00000000-0000-0000-0000-000000000001',
-  acumaticaUserId: 'bypass',
-  username: 'dev-admin',
-  displayName: 'Dev Admin',
-  email: 'dev@local',
-  role: 'Admin',
-  isActive: true,
-  createdAt: new Date().toISOString(),
-};
+// Key used to prevent auto-re-login after an explicit sign-out
+const LOGGED_OUT_KEY = 'auth-logged-out';
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    // If the user explicitly signed out this session, show the login page
+    if (sessionStorage.getItem(LOGGED_OUT_KEY)) {
+      setIsLoading(false);
+      return;
+    }
+
+    const token = sessionStorage.getItem('access_token');
+    if (token) {
+      fetchCurrentUser().catch(() => autoLogin());
+    } else {
+      autoLogin();
+    }
+  }, []);
+
+  // Silently obtain a demo JWT so every API call is authenticated.
+  // Falls back gracefully if demo mode is disabled or the API is down.
+  const autoLogin = async () => {
+    try {
+      const res = await apiClient.post('/auth/demo-login');
+      sessionStorage.setItem('access_token', res.data.accessToken);
+      const { data } = await apiClient.get('/auth/me');
+      setUser(data);
+    } catch {
+      // Demo mode disabled or API unavailable — user will see the login page
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const fetchCurrentUser = async () => {
+    try {
+      const { data } = await apiClient.get('/auth/me');
+      setUser(data);
+    } catch (err) {
+      sessionStorage.removeItem('access_token');
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const login = async (token: string) => {
+    sessionStorage.removeItem(LOGGED_OUT_KEY);
+    sessionStorage.setItem('access_token', token);
+    setIsLoading(true);
+    await fetchCurrentUser();
+  };
+
+  const logout = () => {
+    sessionStorage.removeItem('access_token');
+    sessionStorage.setItem(LOGGED_OUT_KEY, '1');
+    setUser(null);
+    window.location.href = '/login';
+  };
+
   return (
     <AuthContext.Provider value={{
-      user: BYPASS_USER,
-      isLoading: false,
-      isAuthenticated: true,
-      login: async () => {},
-      logout: () => {},
-      isManagerOrAbove: true,
-      isAdmin: true,
+      user,
+      isLoading,
+      isAuthenticated: !!user,
+      login,
+      logout,
+      isManagerOrAbove: user?.role === 'Manager' || user?.role === 'Admin',
+      isAdmin: user?.role === 'Admin',
     }}>
       {children}
     </AuthContext.Provider>

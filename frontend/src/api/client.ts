@@ -17,9 +17,18 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
+// On 401, clear the stale token and redirect to login so auto-login retries.
+// Skip /auth/ routes — they handle their own errors.
 apiClient.interceptors.response.use(
   (r) => r,
-  (error) => Promise.reject(error)
+  (error) => {
+    const url: string = error.config?.url ?? '';
+    if (error.response?.status === 401 && !url.includes('/auth/')) {
+      sessionStorage.removeItem('access_token');
+      window.location.href = '/login';
+    }
+    return Promise.reject(error);
+  }
 );
 
 // ── Documents ──────────────────────────────────────────────────────────
