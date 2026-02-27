@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { documentApi } from '../api/client';
 import StatusBadge from '../components/ui/StatusBadge';
+import { useAuth } from '../contexts/AuthContext';
 import type { PagedResult, Document } from '../types';
-import { Upload, Search, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Upload, Search, ChevronLeft, ChevronRight, Trash2, Loader2 } from 'lucide-react';
 
 const STATUS_OPTIONS = ['', 'Uploaded', 'Processing', 'PendingReview', 'ReviewInProgress', 'Approved', 'Rejected', 'Pushed'];
 
@@ -13,11 +14,22 @@ export default function DocumentListPage() {
   const [status, setStatus] = useState('');
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const { isAdmin } = useAuth();
+  const queryClient = useQueryClient();
 
   const { data, isLoading } = useQuery<PagedResult<Document>>({
     queryKey: ['documents', page, status, search],
     queryFn: () => documentApi.list({ page, pageSize: 20, status: status || undefined, search: search || undefined })
       .then(r => r.data),
+  });
+
+  const deleteDoc = useMutation({
+    mutationFn: (id: string) => documentApi.delete(id),
+    onSuccess: () => {
+      setConfirmDeleteId(null);
+      queryClient.invalidateQueries({ queryKey: ['documents'] });
+    },
   });
 
   return (
@@ -61,11 +73,12 @@ export default function DocumentListPage() {
               <th className="px-4 py-3 text-left font-medium text-gray-500">Status</th>
               <th className="px-4 py-3 text-left font-medium text-gray-500">Uploaded by</th>
               <th className="px-4 py-3 text-left font-medium text-gray-500">Date</th>
+              {isAdmin && <th className="px-4 py-3" />}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {isLoading && (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+              <tr><td colSpan={isAdmin ? 6 : 5} className="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
             )}
             {data?.items.map(doc => (
               <tr key={doc.id} className="hover:bg-gray-50">
@@ -78,10 +91,21 @@ export default function DocumentListPage() {
                 <td className="px-4 py-3"><StatusBadge status={doc.status} /></td>
                 <td className="px-4 py-3 text-gray-600">{doc.uploadedByUsername}</td>
                 <td className="px-4 py-3 text-gray-600">{new Date(doc.uploadedAt).toLocaleDateString()}</td>
+                {isAdmin && (
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      onClick={() => setConfirmDeleteId(doc.id)}
+                      className="text-gray-400 hover:text-red-600 transition-colors"
+                      title="Delete document"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </td>
+                )}
               </tr>
             ))}
             {!isLoading && data?.items.length === 0 && (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-500">No documents found.</td></tr>
+              <tr><td colSpan={isAdmin ? 6 : 5} className="px-4 py-8 text-center text-gray-500">No documents found.</td></tr>
             )}
           </tbody>
         </table>
@@ -99,6 +123,33 @@ export default function DocumentListPage() {
           </Link>
         ))}
       </div>
+
+      {/* Delete confirmation modal */}
+      {confirmDeleteId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+          <div className="card p-6 w-full max-w-sm space-y-4">
+            <h3 className="font-semibold text-gray-900">Delete Document</h3>
+            <p className="text-sm text-gray-600">
+              Are you sure you want to delete "
+              <span className="font-medium">
+                {data?.items.find(d => d.id === confirmDeleteId)?.originalFilename}
+              </span>
+              "? This action cannot be undone.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button className="btn-secondary" onClick={() => setConfirmDeleteId(null)}>Cancel</button>
+              <button
+                className="btn-primary bg-red-600 hover:bg-red-700 flex items-center gap-2"
+                onClick={() => deleteDoc.mutate(confirmDeleteId)}
+                disabled={deleteDoc.isPending}
+              >
+                {deleteDoc.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Pagination */}
       {data && data.totalPages > 1 && (

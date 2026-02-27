@@ -14,9 +14,10 @@ export default function DocumentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { isManagerOrAbove } = useAuth();
+  const { isManagerOrAbove, isAdmin } = useAuth();
   const [rejectReason, setRejectReason] = useState('');
   const [showRejectModal, setShowRejectModal] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
 
   const { data: doc, isLoading } = useQuery<Document>({
     queryKey: ['document', id],
@@ -63,6 +64,11 @@ export default function DocumentDetailPage() {
   const push = useMutation({
     mutationFn: () => erpApi.push(id!),
     onSuccess: () => invalidate(),
+  });
+
+  const deleteDoc = useMutation({
+    mutationFn: () => documentApi.delete(id!),
+    onSuccess: () => navigate('/documents'),
   });
 
   const getSignedUrl = async () => {
@@ -155,6 +161,15 @@ export default function DocumentDetailPage() {
             Push to ERP
           </button>
         )}
+
+        {isAdmin && (
+          <button
+            onClick={() => setShowDeleteModal(true)}
+            className="btn-secondary flex items-center gap-2 text-sm text-red-600 border-red-200 hover:bg-red-50 ml-auto"
+          >
+            <XCircle className="h-4 w-4" /> Delete
+          </button>
+        )}
       </div>
 
       {/* Error notifications */}
@@ -234,6 +249,30 @@ export default function DocumentDetailPage() {
                 <span className="text-gray-500">{v.uploadedByUsername}</span>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Delete modal */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+          <div className="card p-6 w-full max-w-md space-y-4">
+            <h3 className="font-semibold text-gray-900">Delete Document</h3>
+            <p className="text-sm text-gray-600">
+              Are you sure you want to delete <span className="font-medium">"{doc.originalFilename}"</span>?
+              This action cannot be undone.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button className="btn-secondary" onClick={() => setShowDeleteModal(false)}>Cancel</button>
+              <button
+                className="btn-primary bg-red-600 hover:bg-red-700 flex items-center gap-2"
+                onClick={() => deleteDoc.mutate()}
+                disabled={deleteDoc.isPending}
+              >
+                {deleteDoc.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Delete
+              </button>
+            </div>
           </div>
         </div>
       )}

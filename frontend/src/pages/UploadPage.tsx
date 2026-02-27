@@ -30,17 +30,49 @@ export default function UploadPage() {
   });
 
   const [dropErrors, setDropErrors] = useState<string[]>([]);
+  // Files that conflict with existing queue entries (same name) — pending user decision
+  const [duplicates, setDuplicates] = useState<File[]>([]);
 
   const onDrop = useCallback((accepted: File[]) => {
     setDropErrors([]);
-    const newEntries: FileEntry[] = accepted.map(file => ({
-      file,
-      id: `${file.name}-${Date.now()}-${Math.random()}`,
-      status: 'pending',
-      progress: 0,
-    }));
-    setFiles(prev => [...prev, ...newEntries]);
+    setFiles(prev => {
+      const existingNames = new Set(prev.map(f => f.file.name));
+      const conflicts: File[] = [];
+      const fresh: File[] = [];
+      for (const file of accepted) {
+        if (existingNames.has(file.name)) {
+          conflicts.push(file);
+        } else {
+          fresh.push(file);
+        }
+      }
+      if (conflicts.length > 0) setDuplicates(conflicts);
+      const newEntries: FileEntry[] = fresh.map(file => ({
+        file,
+        id: `${file.name}-${Date.now()}-${Math.random()}`,
+        status: 'pending',
+        progress: 0,
+      }));
+      return [...prev, ...newEntries];
+    });
   }, []);
+
+  const handleDuplicateReplace = () => {
+    setFiles(prev => {
+      const dupNames = new Set(duplicates.map(f => f.name));
+      const kept = prev.filter(e => !dupNames.has(e.file.name));
+      const replacements: FileEntry[] = duplicates.map(file => ({
+        file,
+        id: `${file.name}-${Date.now()}-${Math.random()}`,
+        status: 'pending',
+        progress: 0,
+      }));
+      return [...kept, ...replacements];
+    });
+    setDuplicates([]);
+  };
+
+  const handleDuplicateSkip = () => setDuplicates([]);
 
   // Some browsers report PDFs as application/octet-stream; validate by extension too.
   const allowedExtensions = ['pdf', 'png', 'jpg', 'jpeg', 'tif', 'tiff'];
@@ -138,6 +170,33 @@ export default function UploadPage() {
           ))}
         </select>
       </div>
+
+      {/* Duplicate filename modal */}
+      {duplicates.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+          <div className="card p-6 w-full max-w-md space-y-4">
+            <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-yellow-500" />
+              Duplicate {duplicates.length === 1 ? 'Filename' : 'Filenames'} Detected
+            </h3>
+            <p className="text-sm text-gray-600">
+              The following {duplicates.length === 1 ? 'file is' : 'files are'} already in the upload queue:
+            </p>
+            <ul className="text-sm font-medium text-gray-800 space-y-1 max-h-32 overflow-y-auto">
+              {duplicates.map(f => (
+                <li key={f.name} className="truncate">• {f.name}</li>
+              ))}
+            </ul>
+            <p className="text-sm text-gray-600">Do you want to replace the existing {duplicates.length === 1 ? 'entry' : 'entries'} or skip?</p>
+            <div className="flex justify-end gap-3">
+              <button className="btn-secondary" onClick={handleDuplicateSkip}>Skip</button>
+              <button className="btn-primary bg-yellow-600 hover:bg-yellow-700" onClick={handleDuplicateReplace}>
+                Replace
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Drop rejection errors */}
       {dropErrors.length > 0 && (
