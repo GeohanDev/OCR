@@ -29,7 +29,10 @@ export default function UploadPage() {
     queryFn: () => configApi.getDocumentTypes().then(r => r.data),
   });
 
+  const [dropErrors, setDropErrors] = useState<string[]>([]);
+
   const onDrop = useCallback((accepted: File[]) => {
+    setDropErrors([]);
     const newEntries: FileEntry[] = accepted.map(file => ({
       file,
       id: `${file.name}-${Date.now()}-${Math.random()}`,
@@ -39,15 +42,33 @@ export default function UploadPage() {
     setFiles(prev => [...prev, ...newEntries]);
   }, []);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+  // Some browsers report PDFs as application/octet-stream; validate by extension too.
+  const allowedExtensions = ['pdf', 'png', 'jpg', 'jpeg', 'tif', 'tiff'];
+  const fileValidator = (file: File) => {
+    const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+    if (!allowedExtensions.includes(ext)) {
+      return { code: 'wrong-file-type', message: `"${file.name}" is not allowed. Only PDF, PNG, JPG, and TIFF files are accepted.` };
+    }
+    return null;
+  };
+
+  const { getRootProps, getInputProps, isDragActive, fileRejections } = useDropzone({
     onDrop,
     accept: {
       'application/pdf': ['.pdf'],
       'image/png': ['.png'],
       'image/jpeg': ['.jpg', '.jpeg'],
       'image/tiff': ['.tif', '.tiff'],
+      // Fallback: some browsers/OSes report PDFs as octet-stream
+      'application/octet-stream': ['.pdf', '.png', '.jpg', '.jpeg', '.tif', '.tiff'],
     },
+    validator: fileValidator,
     maxSize: 50 * 1024 * 1024, // 50 MB
+    onDropRejected: (rejections) => {
+      setDropErrors(rejections.map(r =>
+        r.errors[0]?.message ?? `"${r.file.name}" was rejected.`
+      ));
+    },
   });
 
   const removeFile = (id: string) => {
@@ -67,12 +88,25 @@ export default function UploadPage() {
         if (selectedType) formData.append('documentTypeId', selectedType);
 
         const res = await documentApi.upload(formData);
-        const docId = res.data[0]?.id;
-        setFiles(prev => prev.map(f =>
-          f.id === entry.id ? { ...f, status: 'done', progress: 100, documentId: docId } : f
-        ));
+        // Backend returns [{ success: boolean, document?: DocumentDto, error?: string }]
+        const item = res.data[0];
+        if (item?.success === false) {
+          setFiles(prev => prev.map(f =>
+            f.id === entry.id ? { ...f, status: 'error', error: item.error ?? 'Upload failed' } : f
+          ));
+        } else {
+          const docId = item?.document?.id;
+          setFiles(prev => prev.map(f =>
+            f.id === entry.id ? { ...f, status: 'done', progress: 100, documentId: docId } : f
+          ));
+        }
       } catch (err: unknown) {
-        const message = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Upload failed';
+        const errData = (err as { response?: { data?: unknown } })?.response?.data;
+        const message =
+          (typeof errData === 'string' ? errData : null) ??
+          (errData as { detail?: string })?.detail ??
+          (errData as { error?: string })?.error ??
+          'Upload failed';
         setFiles(prev => prev.map(f =>
           f.id === entry.id ? { ...f, status: 'error', error: message } : f
         ));
@@ -104,6 +138,18 @@ export default function UploadPage() {
           ))}
         </select>
       </div>
+
+      {/* Drop rejection errors */}
+      {dropErrors.length > 0 && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3 space-y-1">
+          {dropErrors.map((msg, i) => (
+            <p key={i} className="text-sm text-red-700 flex items-start gap-2">
+              <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+              {msg}
+            </p>
+          ))}
+        </div>
+      )}
 
       {/* Drop zone */}
       <div

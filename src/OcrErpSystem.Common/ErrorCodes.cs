@@ -11,6 +11,7 @@ public static class ErrorCodes
     public const string ErpLookupFailed = "ERP_LOOKUP_FAILED";
     public const string ApprovalBlocked = "APPROVAL_BLOCKED";
     public const string InvalidStatus = "INVALID_STATUS";
+    public const string InvalidFileType = "INVALID_FILE_TYPE";
     public const string StorageFailed = "STORAGE_FAILED";
     public const string SyncFailed = "SYNC_FAILED";
 }

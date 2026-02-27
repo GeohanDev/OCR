@@ -53,9 +53,8 @@ public class LocalFileStorageService : IFileStorageService
         var expiryUnix = DateTimeOffset.UtcNow.Add(expiry).ToUnixTimeSeconds();
         var token = Convert.ToBase64String(
             SHA256.HashData(Encoding.UTF8.GetBytes($"{storagePath}:{expiryUnix}:{_signingKey}")));
-        var encodedPath = Uri.EscapeDataString(storagePath);
         var encodedToken = Uri.EscapeDataString(token);
-        return Task.FromResult($"{_baseUrl}/{encodedPath}?expires={expiryUnix}&token={encodedToken}");
+        return Task.FromResult($"{_baseUrl}/{storagePath}?expires={expiryUnix}&token={encodedToken}");
     }
 
     public async Task<string> ComputeHashAsync(Stream fileStream, CancellationToken ct = default)

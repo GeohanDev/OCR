@@ -20,21 +20,52 @@ public class DocumentService : IDocumentService
         _storage = storage;
     }
 
+    private static readonly HashSet<string> AllowedMimeTypes =
+    [
+        "application/pdf", "image/png", "image/jpeg", "image/tiff"
+    ];
+
+    private static string NormalizeMimeType(string? mimeType, string filename)
+    {
+        // Browser may send application/octet-stream or empty for PDF/image files;
+        // derive the correct type from the file extension as a fallback.
+        if (!string.IsNullOrEmpty(mimeType) &&
+            mimeType != "application/octet-stream" &&
+            mimeType != "application/x-www-form-urlencoded")
+            return mimeType;
+
+        return Path.GetExtension(filename).ToLowerInvariant() switch
+        {
+            ".pdf"              => "application/pdf",
+            ".png"              => "image/png",
+            ".jpg" or ".jpeg"   => "image/jpeg",
+            ".tif" or ".tiff"   => "image/tiff",
+            _                   => mimeType ?? "application/octet-stream"
+        };
+    }
+
     public async Task<Result<DocumentDto>> UploadAsync(UploadDocumentCommand cmd, CancellationToken ct = default)
     {
+        var mimeType = NormalizeMimeType(cmd.MimeType, cmd.OriginalFilename);
+
+        if (!AllowedMimeTypes.Contains(mimeType))
+            return Result<DocumentDto>.Failure(
+                $"Unsupported file type '{mimeType}'. Only PDF, PNG, JPG, and TIFF files are accepted.",
+                ErrorCodes.InvalidFileType);
+
         var hash = await _storage.ComputeHashAsync(cmd.FileStream, ct);
         var existing = await _repo.GetByHashAsync(hash, ct);
         if (existing is not null)
             return Result<DocumentDto>.Failure("Duplicate document detected.", ErrorCodes.DuplicateDocument);
 
-        var storagePath = await _storage.StoreAsync(cmd.FileStream, cmd.OriginalFilename, cmd.MimeType, ct);
+        var storagePath = await _storage.StoreAsync(cmd.FileStream, cmd.OriginalFilename, mimeType, ct);
         var doc = new Document
         {
             DocumentTypeId = cmd.DocumentTypeId == Guid.Empty ? null : cmd.DocumentTypeId,
             OriginalFilename = cmd.OriginalFilename,
             StoragePath = storagePath,
             FileHash = hash,
-            MimeType = cmd.MimeType,
+            MimeType = mimeType,
             FileSizeBytes = cmd.FileSizeBytes,
             Status = DocumentStatus.Uploaded,
             UploadedBy = cmd.UploadedBy,
@@ -102,8 +133,14 @@ public class DocumentService : IDocumentService
         var doc = await _repo.GetByIdAsync(documentId, ct);
         if (doc is null) return Result<DocumentDto>.Failure("Document not found.", ErrorCodes.NotFound);
 
+        var mimeType = NormalizeMimeType(cmd.MimeType, cmd.OriginalFilename);
+        if (!AllowedMimeTypes.Contains(mimeType))
+            return Result<DocumentDto>.Failure(
+                $"Unsupported file type '{mimeType}'. Only PDF, PNG, JPG, and TIFF files are accepted.",
+                ErrorCodes.InvalidFileType);
+
         var hash = await _storage.ComputeHashAsync(cmd.FileStream, ct);
-        var storagePath = await _storage.StoreAsync(cmd.FileStream, cmd.OriginalFilename, cmd.MimeType, ct);
+        var storagePath = await _storage.StoreAsync(cmd.FileStream, cmd.OriginalFilename, mimeType, ct);
 
         doc.CurrentVersion++;
         doc.StoragePath = storagePath;
