@@ -45,39 +45,71 @@ public class TesseractOcrEngine : ITesseractOcrEngine
         var fullTextBuilder = new System.Text.StringBuilder();
         var confidences = new List<double>();
 
-        using var engine = new TesseractEngine(_tessDataPath, _language, EngineMode.Default);
+        // Only create a Tesseract engine if any page needs image-based OCR
+        var needsTesseract = pages.Any(p => p.PreExtractedBlocks is null or { Count: 0 });
+        TesseractEngine? engine = needsTesseract
+            ? new TesseractEngine(_tessDataPath, _language, EngineMode.LstmOnly)
+            : null;
 
-        foreach (var page in pages)
+        try
         {
-            ct.ThrowIfCancellationRequested();
-            using var pix = Pix.LoadFromMemory(page.ImageData);
-            using var tesPage = engine.Process(pix, PageSegMode.Auto);
-
-            fullTextBuilder.AppendLine(tesPage.GetText());
-            confidences.Add(tesPage.GetMeanConfidence());
-
-            using var wordIter = tesPage.GetIterator();
-            wordIter.Begin();
-            do
+            if (engine is not null)
             {
-                if (wordIter.TryGetBoundingBox(PageIteratorLevel.Word, out var bbox))
+                // Improve recognition: tell Tesseract the image DPI and preserve spacing
+                engine.SetVariable("user_defined_dpi", "300");
+                engine.SetVariable("preserve_interword_spaces", "1");
+            }
+
+            foreach (var page in pages)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                // --- Fast path: text PDF already extracted by PdfPig ---
+                if (page.PreExtractedBlocks is { Count: > 0 })
                 {
-                    var text = wordIter.GetText(PageIteratorLevel.Word);
-                    var conf = wordIter.GetConfidence(PageIteratorLevel.Word);
-                    if (!string.IsNullOrWhiteSpace(text))
-                        allBlocks.Add(new OcrBlock(
-                            page.PageNumber,
-                            text.Trim(),
-                            conf / 100f,
-                            new OcrBoundingBox(bbox.X1, bbox.Y1, bbox.Width, bbox.Height),
-                            OcrBlockType.Word));
+                    allBlocks.AddRange(page.PreExtractedBlocks);
+                    fullTextBuilder.AppendLine(
+                        string.Join(" ", page.PreExtractedBlocks.Select(b => b.Text)));
+                    confidences.Add(0.92);
+                    continue;
                 }
-            } while (wordIter.Next(PageIteratorLevel.Word));
+
+                // --- Slow path: scanned document or image — run Tesseract ---
+                using var pix = Pix.LoadFromMemory(page.ImageData);
+                using var tesPage = engine!.Process(pix, PageSegMode.Auto);
+
+                fullTextBuilder.AppendLine(tesPage.GetText());
+                var meanConf = tesPage.GetMeanConfidence();
+                confidences.Add(meanConf);
+
+                using var wordIter = tesPage.GetIterator();
+                wordIter.Begin();
+                do
+                {
+                    if (wordIter.TryGetBoundingBox(PageIteratorLevel.Word, out var bbox))
+                    {
+                        var text = wordIter.GetText(PageIteratorLevel.Word);
+                        var conf = wordIter.GetConfidence(PageIteratorLevel.Word);
+                        if (!string.IsNullOrWhiteSpace(text))
+                            allBlocks.Add(new OcrBlock(
+                                page.PageNumber,
+                                text.Trim(),
+                                conf / 100f,
+                                new OcrBoundingBox(bbox.X1, bbox.Y1, bbox.Width, bbox.Height),
+                                OcrBlockType.Word));
+                    }
+                } while (wordIter.Next(PageIteratorLevel.Word));
+            }
+        }
+        finally
+        {
+            engine?.Dispose();
         }
 
         await Task.CompletedTask;
         var overallConf = confidences.Count > 0 ? confidences.Average() : 0;
-        _logger.LogDebug("Tesseract processed {PageCount} pages, confidence={Conf:F2}", pages.Count, overallConf);
+        _logger.LogDebug("OCR processed {PageCount} pages, confidence={Conf:F2}, blocks={Blocks}",
+            pages.Count, overallConf, allBlocks.Count);
 
         return new TesseractOutput(fullTextBuilder.ToString(), allBlocks, overallConf, "5.2.0");
     }

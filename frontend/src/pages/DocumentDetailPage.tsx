@@ -6,7 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 import StatusBadge from '../components/ui/StatusBadge';
 import type { Document, OcrResult } from '../types';
 import {
-  ChevronLeft, Cpu, CheckCircle, XCircle, Send, Eye, FileText,
+  ChevronLeft, Cpu, XCircle, Send, Eye, FileText,
   AlertTriangle, Loader2, Clock, History
 } from 'lucide-react';
 
@@ -15,8 +15,6 @@ export default function DocumentDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { isManagerOrAbove, isAdmin } = useAuth();
-  const [rejectReason, setRejectReason] = useState('');
-  const [showRejectModal, setShowRejectModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
 
   const { data: doc, isLoading } = useQuery<Document>({
@@ -51,16 +49,6 @@ export default function DocumentDetailPage() {
     },
   });
 
-  const approve = useMutation({
-    mutationFn: () => validationApi.approve(id!),
-    onSuccess: () => invalidate(),
-  });
-
-  const reject = useMutation({
-    mutationFn: () => validationApi.reject(id!, rejectReason),
-    onSuccess: () => { invalidate(); setShowRejectModal(false); },
-  });
-
   const push = useMutation({
     mutationFn: () => erpApi.push(id!),
     onSuccess: () => invalidate(),
@@ -81,7 +69,6 @@ export default function DocumentDetailPage() {
 
   const canOcr = doc.status === 'Uploaded';
   const canValidate = ['PendingReview', 'ReviewInProgress'].includes(doc.status);
-  const canApprove = isManagerOrAbove && ['PendingReview', 'ReviewInProgress'].includes(doc.status);
   const canPush = isManagerOrAbove && doc.status === 'Approved';
 
   return (
@@ -132,25 +119,6 @@ export default function DocumentDetailPage() {
           </button>
         )}
 
-        {canApprove && (
-          <>
-            <button
-              onClick={() => approve.mutate()}
-              disabled={approve.isPending}
-              className="btn-primary flex items-center gap-2 text-sm bg-green-600 hover:bg-green-700"
-            >
-              {approve.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
-              Approve
-            </button>
-            <button
-              onClick={() => setShowRejectModal(true)}
-              className="btn-secondary flex items-center gap-2 text-sm text-red-600 border-red-200 hover:bg-red-50"
-            >
-              <XCircle className="h-4 w-4" /> Reject
-            </button>
-          </>
-        )}
-
         {canPush && (
           <button
             onClick={() => push.mutate()}
@@ -173,12 +141,6 @@ export default function DocumentDetailPage() {
       </div>
 
       {/* Error notifications */}
-      {approve.error && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
-          {(approve.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Approval failed'}
-        </div>
-      )}
-
       {triggerOcr.isError && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
           OCR processing failed. Check that the document is a valid PDF, PNG, or TIFF and try again.
@@ -277,31 +239,6 @@ export default function DocumentDetailPage() {
         </div>
       )}
 
-      {/* Reject modal */}
-      {showRejectModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
-          <div className="card p-6 w-full max-w-md space-y-4">
-            <h3 className="font-semibold text-gray-900">Reject Document</h3>
-            <p className="text-sm text-gray-600">Please provide a reason for rejection.</p>
-            <textarea
-              className="input w-full h-24 resize-none"
-              placeholder="Rejection reason..."
-              value={rejectReason}
-              onChange={e => setRejectReason(e.target.value)}
-            />
-            <div className="flex justify-end gap-3">
-              <button className="btn-secondary" onClick={() => setShowRejectModal(false)}>Cancel</button>
-              <button
-                className="btn-primary bg-red-600 hover:bg-red-700"
-                onClick={() => reject.mutate()}
-                disabled={reject.isPending || !rejectReason.trim()}
-              >
-                {reject.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Confirm Reject'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

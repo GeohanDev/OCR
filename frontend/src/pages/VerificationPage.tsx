@@ -1,12 +1,11 @@
 import { useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { documentApi, ocrApi, validationApi } from '../api/client';
-import { useAuth } from '../contexts/AuthContext';
+import { useQuery } from '@tanstack/react-query';
+import { documentApi, ocrApi } from '../api/client';
 import FieldReviewPanel from '../components/FieldReviewPanel';
 import StatusBadge from '../components/ui/StatusBadge';
 import type { Document, OcrResult, ExtractedField } from '../types';
-import { ChevronLeft, CheckCircle, XCircle, ZoomIn, ZoomOut, Loader2 } from 'lucide-react';
+import { ChevronLeft, ZoomIn, ZoomOut, Loader2 } from 'lucide-react';
 import { Document as PdfDocument, Page as PdfPage, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
@@ -19,16 +18,12 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 export default function VerificationPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const { isManagerOrAbove } = useAuth();
 
   const [selectedField, setSelectedField] = useState<ExtractedField | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.0);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
-  const [showRejectModal, setShowRejectModal] = useState(false);
-  const [rejectReason, setRejectReason] = useState('');
   const canvasRef = useRef<HTMLDivElement>(null);
 
   const { data: doc } = useQuery<Document>({
@@ -53,21 +48,6 @@ export default function VerificationPage() {
     },
     enabled: !!id,
     staleTime: 5 * 60 * 1000,
-  });
-
-  const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ['document', id] });
-    queryClient.invalidateQueries({ queryKey: ['documents'] });
-  };
-
-  const approve = useMutation({
-    mutationFn: () => validationApi.approve(id!),
-    onSuccess: () => { invalidate(); navigate(`/documents/${id}`); },
-  });
-
-  const reject = useMutation({
-    mutationFn: () => validationApi.reject(id!, rejectReason),
-    onSuccess: () => { invalidate(); setShowRejectModal(false); navigate(`/documents/${id}`); },
   });
 
   const fields = ocrResult?.fields ?? [];
@@ -181,51 +161,6 @@ export default function VerificationPage() {
           </div>
         </div>
       </div>
-
-      {/* Sticky footer — approve / reject */}
-      {isManagerOrAbove && doc && ['PendingReview', 'ReviewInProgress'].includes(doc.status) && (
-        <div className="flex-shrink-0 bg-white border-t border-gray-200 px-4 py-3 flex items-center justify-end gap-3">
-          <button
-            onClick={() => setShowRejectModal(true)}
-            className="btn-secondary flex items-center gap-2 text-red-600 border-red-200 hover:bg-red-50"
-          >
-            <XCircle className="h-4 w-4" /> Reject
-          </button>
-          <button
-            onClick={() => approve.mutate()}
-            disabled={approve.isPending}
-            className="btn-primary flex items-center gap-2 bg-green-600 hover:bg-green-700"
-          >
-            {approve.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
-            Approve
-          </button>
-        </div>
-      )}
-
-      {/* Reject modal */}
-      {showRejectModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
-          <div className="card p-6 w-full max-w-md space-y-4">
-            <h3 className="font-semibold text-gray-900">Reject Document</h3>
-            <textarea
-              className="input w-full h-24 resize-none"
-              placeholder="Rejection reason..."
-              value={rejectReason}
-              onChange={e => setRejectReason(e.target.value)}
-            />
-            <div className="flex justify-end gap-3">
-              <button className="btn-secondary" onClick={() => setShowRejectModal(false)}>Cancel</button>
-              <button
-                className="btn-primary bg-red-600 hover:bg-red-700"
-                onClick={() => reject.mutate()}
-                disabled={reject.isPending || !rejectReason.trim()}
-              >
-                {reject.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Confirm Reject'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

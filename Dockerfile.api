@@ -26,16 +26,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libtesseract-dev \
     tesseract-ocr \
     tesseract-ocr-eng \
+    libleptonica-dev \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/publish .
 
+# InteropDotNet (used by Tesseract NuGet) looks for native libs in /app/x64/.
+# The NuGet package ships Windows DLLs there; add Linux .so symlinks alongside them.
+# Also add libdl.so — on Debian 12 only libdl.so.2 exists; .NET P/Invoke looks in /app/ first.
+RUN ln -sf /usr/lib/x86_64-linux-gnu/liblept.so.5       /app/x64/libleptonica-1.82.0.so && \
+    ln -sf /usr/lib/x86_64-linux-gnu/libtesseract.so.5  /app/x64/libtesseract50.so && \
+    ln -sf /usr/lib/x86_64-linux-gnu/libdl.so.2         /app/libdl.so
+
 # Create directories for local file storage and Tesseract data
 RUN mkdir -p /data/documents /data/tessdata && \
     cp /usr/share/tesseract-ocr/5/tessdata/eng.traineddata /data/tessdata/ 2>/dev/null || true
 
-ENV LD_LIBRARY_PATH=/app/runtimes/linux-x64/native:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/app:/app/runtimes/linux-x64/native:$LD_LIBRARY_PATH
 ENV ASPNETCORE_URLS=http://+:8080
 ENV Tesseract__DataPath=/data/tessdata
 ENV Storage__Type=local

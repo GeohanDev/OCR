@@ -8,7 +8,10 @@ public interface IImagePreprocessor
     Task<IReadOnlyList<ProcessedPageImage>> PreprocessAsync(Stream fileStream, string mimeType, CancellationToken ct = default);
 }
 
-public record ProcessedPageImage(int PageNumber, byte[] ImageData, int Width, int Height, int Dpi);
+// PreExtractedBlocks is populated for text-based PDFs so TesseractOcrEngine
+// can skip the image-render → OCR round-trip and use PdfPig's text directly.
+public record ProcessedPageImage(int PageNumber, byte[] ImageData, int Width, int Height, int Dpi,
+    IReadOnlyList<OcrBlock>? PreExtractedBlocks = null);
 
 public class ImagePreprocessor : IImagePreprocessor
 {
@@ -41,7 +44,7 @@ public class ImagePreprocessor : IImagePreprocessor
         return [await ProcessImageAsync(fileStream, 1)];
     }
 
-    private static Task<IReadOnlyList<ProcessedPageImage>> ProcessPdfAsync(Stream pdfStream, CancellationToken ct)
+    private static async Task<IReadOnlyList<ProcessedPageImage>> ProcessPdfAsync(Stream pdfStream, CancellationToken ct)
     {
         var pages = new List<ProcessedPageImage>();
         using var doc = PdfDocument.Open(pdfStream);
@@ -50,29 +53,78 @@ public class ImagePreprocessor : IImagePreprocessor
         {
             ct.ThrowIfCancellationRequested();
 
-            // Convert page dimensions (points) to pixels at target DPI
-            var widthPx = Math.Max((int)(page.Width / 72.0 * TargetDpi), 100);
+            // Convert page dimensions (PDF points) to pixels at target DPI
+            var widthPx  = Math.Max((int)(page.Width  / 72.0 * TargetDpi), 100);
             var heightPx = Math.Max((int)(page.Height / 72.0 * TargetDpi), 100);
 
-            // Create a white page image (in production, use a PDF renderer like PDFium)
+            // --- Direct text extraction (text-based PDFs) ---
+            // PdfPig can read embedded text directly; no OCR needed for those.
+            var directBlocks = new List<OcrBlock>();
+            foreach (var word in page.GetWords())
+            {
+                if (string.IsNullOrWhiteSpace(word.Text)) continue;
+
+                // PDF coordinate origin is bottom-left; convert to top-left for image space.
+                var x = (int)(word.BoundingBox.Left   / page.Width  * widthPx);
+                var y = (int)((1.0 - word.BoundingBox.Top / page.Height) * heightPx);
+                var w = Math.Max((int)(word.BoundingBox.Width  / page.Width  * widthPx), 1);
+                var h = Math.Max((int)(word.BoundingBox.Height / page.Height * heightPx), 1);
+
+                directBlocks.Add(new OcrBlock(
+                    pageNum,
+                    word.Text.Trim(),
+                    0.92f,
+                    new OcrBoundingBox(x, y, w, h),
+                    OcrBlockType.Word));
+            }
+
+            // --- Scanned PDF: extract embedded raster images for OCR ---
+            // When PdfPig finds no text, the page is an image scan. Extract the
+            // largest embedded image and preprocess it exactly like a standalone image.
+            if (directBlocks.Count == 0)
+            {
+                var embeddedImages = page.GetImages().ToList();
+                if (embeddedImages.Count > 0)
+                {
+                    var largest = embeddedImages
+                        .OrderByDescending(img => img.WidthInSamples * img.HeightInSamples)
+                        .First();
+
+                    if (largest.TryGetPng(out var pngBytes))
+                    {
+                        using var imgStream = new MemoryStream(pngBytes);
+                        var preprocessed = await ProcessImageAsync(imgStream, pageNum++);
+                        pages.Add(preprocessed);
+                        continue;
+                    }
+                }
+            }
+
+            // --- Render image for the document viewer (text PDF) ---
             using var bitmap = new SKBitmap(widthPx, heightPx, SKColorType.Gray8, SKAlphaType.Opaque);
             using var canvas = new SKCanvas(bitmap);
             canvas.Clear(SKColors.White);
 
-            // Draw text blocks from PdfPig extraction for basic image representation
-            using var paint = new SKPaint { Color = SKColors.Black, TextSize = 12 };
-            foreach (var word in page.GetWords())
+            if (directBlocks.Count > 0)
             {
-                var x = (float)(word.BoundingBox.Left / page.Width * widthPx);
-                var y = (float)((1 - word.BoundingBox.Bottom / page.Height) * heightPx);
-                canvas.DrawText(word.Text, x, y, paint);
+                using var paint = new SKPaint { Color = SKColors.Black, IsAntialias = true };
+                foreach (var word in page.GetWords())
+                {
+                    if (string.IsNullOrWhiteSpace(word.Text)) continue;
+                    var x = (float)(word.BoundingBox.Left / page.Width * widthPx);
+                    var y = (float)((1.0 - word.BoundingBox.Bottom / page.Height) * heightPx);
+                    paint.TextSize = Math.Max((float)(word.BoundingBox.Height / page.Height * heightPx), 8f);
+                    canvas.DrawText(word.Text, x, y, paint);
+                }
             }
 
             using var image = SKImage.FromBitmap(bitmap);
             var imageData = image.Encode(SKEncodedImageFormat.Png, 100).ToArray();
-            pages.Add(new ProcessedPageImage(pageNum++, imageData, widthPx, heightPx, TargetDpi));
+            pages.Add(new ProcessedPageImage(
+                pageNum++, imageData, widthPx, heightPx, TargetDpi,
+                directBlocks.Count > 0 ? directBlocks : null));
         }
-        return Task.FromResult<IReadOnlyList<ProcessedPageImage>>(pages);
+        return pages;
     }
 
     private static Task<ProcessedPageImage> ProcessImageAsync(Stream imageStream, int pageNumber)
