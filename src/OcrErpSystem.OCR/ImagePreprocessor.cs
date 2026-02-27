@@ -14,11 +14,28 @@ public class ImagePreprocessor : IImagePreprocessor
 {
     private const int TargetDpi = 300;
 
+    // PDF magic bytes: %PDF (0x25 0x50 0x44 0x46)
+    private static async Task<bool> IsPdfAsync(Stream stream, CancellationToken ct)
+    {
+        var header = new byte[4];
+        var read = await stream.ReadAsync(header.AsMemory(0, 4), ct);
+        return read == 4
+            && header[0] == 0x25 && header[1] == 0x50
+            && header[2] == 0x44 && header[3] == 0x46;
+    }
+
     public async Task<IReadOnlyList<ProcessedPageImage>> PreprocessAsync(Stream fileStream, string mimeType, CancellationToken ct = default)
     {
         fileStream.Seek(0, SeekOrigin.Begin);
 
-        if (mimeType.Contains("pdf", StringComparison.OrdinalIgnoreCase))
+        // Detect PDF by magic bytes first — browsers/proxies sometimes send
+        // application/octet-stream for PDFs, causing the MIME check to miss.
+        var isPdf = mimeType.Contains("pdf", StringComparison.OrdinalIgnoreCase)
+                    || await IsPdfAsync(fileStream, ct);
+
+        fileStream.Seek(0, SeekOrigin.Begin);
+
+        if (isPdf)
             return await ProcessPdfAsync(fileStream, ct);
 
         return [await ProcessImageAsync(fileStream, 1)];

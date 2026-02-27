@@ -48,6 +48,23 @@ public class OcrPipelineService : IOcrService
         _logger = logger;
     }
 
+    private static string ResolveMimeType(string? storedMime, string storagePath)
+    {
+        if (!string.IsNullOrEmpty(storedMime)
+            && storedMime != "application/octet-stream"
+            && storedMime != "application/x-www-form-urlencoded")
+            return storedMime;
+
+        return Path.GetExtension(storagePath).ToLowerInvariant() switch
+        {
+            ".pdf"              => "application/pdf",
+            ".png"              => "image/png",
+            ".jpg" or ".jpeg"   => "image/jpeg",
+            ".tif" or ".tiff"   => "image/tiff",
+            _                   => storedMime ?? "application/octet-stream"
+        };
+    }
+
     public async Task<OcrPipelineResult> ProcessDocumentAsync(Guid documentId, CancellationToken ct = default)
     {
         var doc = await _docRepo.GetByIdAsync(documentId, ct)
@@ -60,7 +77,9 @@ public class OcrPipelineService : IOcrService
         try
         {
             await using var fileStream = await _storage.ReadAsync(doc.StoragePath, ct);
-            var pages = await _preprocessor.PreprocessAsync(fileStream, doc.MimeType ?? "application/pdf", ct);
+            // Resolve MIME type from storage extension when the stored value is missing or generic.
+            var mimeType = ResolveMimeType(doc.MimeType, doc.StoragePath);
+            var pages = await _preprocessor.PreprocessAsync(fileStream, mimeType, ct);
             var ocrOutput = await _engine.RecognizeAsync(pages, ct);
 
             IReadOnlyList<FieldMappingConfigDto> fieldConfigs = [];
