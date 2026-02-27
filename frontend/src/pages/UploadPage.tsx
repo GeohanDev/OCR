@@ -52,7 +52,7 @@ export default function UploadPage() {
     return null;
   };
 
-  const { getRootProps, getInputProps, isDragActive, fileRejections } = useDropzone({
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
       'application/pdf': ['.pdf'],
