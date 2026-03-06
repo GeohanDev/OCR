@@ -14,6 +14,14 @@ export const apiClient = axios.create({
 apiClient.interceptors.request.use((config) => {
   const token = sessionStorage.getItem('access_token');
   if (token) config.headers.Authorization = `Bearer ${token}`;
+
+  // Forward the user's Acumatica token on ERP and validation requests.
+  // Validation runs call ERP validators internally, so they need the token too.
+  const acumaticaToken = sessionStorage.getItem('acumatica_token');
+  if (acumaticaToken && (config.url?.includes('/erp/') || config.url?.includes('/validation/'))) {
+    config.headers['X-Acumatica-Token'] = acumaticaToken;
+  }
+
   return config;
 });
 
@@ -43,6 +51,8 @@ export const documentApi = {
     }),
   updateStatus: (id: string, status: string, notes?: string) =>
     apiClient.patch(`/documents/${id}/status`, { status, notes }),
+  assignDocumentType: (id: string, documentTypeId: string | null) =>
+    apiClient.patch(`/documents/${id}/type`, { documentTypeId }),
   delete: (id: string) => apiClient.delete(`/documents/${id}`),
   addVersion: (id: string, formData: FormData) =>
     apiClient.post(`/documents/${id}/versions`, formData, {
@@ -60,12 +70,16 @@ export const ocrApi = {
     apiClient.get(`/ocr/${documentId}/raw-text`),
   correctField: (documentId: string, fieldId: string, correctedValue: string) =>
     apiClient.patch(`/ocr/${documentId}/fields/${fieldId}`, { correctedValue }),
+  deleteField: (documentId: string, fieldId: string) =>
+    apiClient.delete(`/ocr/${documentId}/fields/${fieldId}`),
 };
 
 // ── Validation ─────────────────────────────────────────────────────────
 export const validationApi = {
   run: (documentId: string) =>
     apiClient.post(`/validation/${documentId}/run`),
+  validateField: (documentId: string, fieldId: string) =>
+    apiClient.post(`/validation/${documentId}/field/${fieldId}`),
   getResults: (documentId: string) =>
     apiClient.get(`/validation/${documentId}/results`),
   approve: (documentId: string, notes?: string) =>
@@ -78,12 +92,24 @@ export const validationApi = {
 export const erpApi = {
   push: (documentId: string) =>
     apiClient.post(`/erp/${documentId}/push`),
+  getVendors: (top?: number) =>
+    apiClient.get('/erp/lookup/vendors/list', top ? { params: { top } } : undefined),
   lookupVendor: (vendorId: string) =>
     apiClient.get('/erp/lookup/vendors', { params: { vendorId } }),
+  lookupVendorByName: (vendorName: string) =>
+    apiClient.get('/erp/lookup/vendors', { params: { vendorName } }),
   lookupCurrency: (currencyCode: string) =>
     apiClient.get('/erp/lookup/currencies', { params: { currencyCode } }),
   lookupBranch: (branchCode: string) =>
     apiClient.get('/erp/lookup/branches', { params: { branchCode } }),
+  lookupApInvoice: (invoiceNbr: string) =>
+    apiClient.get('/erp/lookup/ap-invoices', { params: { invoiceNbr } }),
+  getErpEntities: () =>
+    apiClient.get('/erp/entities'),
+  lookupGeneric: (entity: string, field: string, value: string) =>
+    apiClient.get('/erp/lookup/generic', { params: { entity, field, value } }),
+  probeEntity: (entity: string) =>
+    apiClient.get(`/erp/probe/${entity}`),
 };
 
 // ── Config ────────────────────────────────────────────────────────────

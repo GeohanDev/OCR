@@ -8,5 +8,6 @@ public enum DocumentStatus
     ReviewInProgress,
     Approved,
     Rejected,
-    Pushed
+    Pushed,
+    Checked
 }

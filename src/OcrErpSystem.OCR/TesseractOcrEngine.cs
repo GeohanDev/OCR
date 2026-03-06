@@ -76,29 +76,20 @@ public class TesseractOcrEngine : ITesseractOcrEngine
 
                 // --- Slow path: scanned document or image — run Tesseract ---
                 using var pix = Pix.LoadFromMemory(page.ImageData);
-                using var tesPage = engine!.Process(pix, PageSegMode.Auto);
+                var (pageText, meanConf, pageBlocks) = ProcessPageOcr(engine!, pix, page.PageNumber, PageSegMode.Auto);
 
-                fullTextBuilder.AppendLine(tesPage.GetText());
-                var meanConf = tesPage.GetMeanConfidence();
-                confidences.Add(meanConf);
-
-                using var wordIter = tesPage.GetIterator();
-                wordIter.Begin();
-                do
+                // Auto mode can fail on tightly-packed or structured layouts; retry with
+                // SparseText which handles sparse/tabular content better.
+                if (meanConf < 0.3 && pageBlocks.Count == 0)
                 {
-                    if (wordIter.TryGetBoundingBox(PageIteratorLevel.Word, out var bbox))
-                    {
-                        var text = wordIter.GetText(PageIteratorLevel.Word);
-                        var conf = wordIter.GetConfidence(PageIteratorLevel.Word);
-                        if (!string.IsNullOrWhiteSpace(text))
-                            allBlocks.Add(new OcrBlock(
-                                page.PageNumber,
-                                text.Trim(),
-                                conf / 100f,
-                                new OcrBoundingBox(bbox.X1, bbox.Y1, bbox.Width, bbox.Height),
-                                OcrBlockType.Word));
-                    }
-                } while (wordIter.Next(PageIteratorLevel.Word));
+                    _logger.LogDebug("Page {P}: Auto PSM yielded no blocks (conf={C:F2}), retrying with SparseText",
+                        page.PageNumber, meanConf);
+                    (pageText, meanConf, pageBlocks) = ProcessPageOcr(engine!, pix, page.PageNumber, PageSegMode.SparseText);
+                }
+
+                fullTextBuilder.AppendLine(pageText);
+                confidences.Add(meanConf);
+                allBlocks.AddRange(pageBlocks);
             }
         }
         finally
@@ -107,10 +98,43 @@ public class TesseractOcrEngine : ITesseractOcrEngine
         }
 
         await Task.CompletedTask;
-        var overallConf = confidences.Count > 0 ? confidences.Average() : 0;
+        var overallConf = confidences.Count > 0 ? confidences.Average() : 0.0;
         _logger.LogDebug("OCR processed {PageCount} pages, confidence={Conf:F2}, blocks={Blocks}",
             pages.Count, overallConf, allBlocks.Count);
 
         return new TesseractOutput(fullTextBuilder.ToString(), allBlocks, overallConf, "5.2.0");
+    }
+
+    /// <summary>
+    /// Runs Tesseract on a single <paramref name="pix"/> with the given <paramref name="mode"/>
+    /// and returns the page text, mean confidence, and word-level blocks.
+    /// </summary>
+    private static (string Text, double MeanConf, List<OcrBlock> Blocks) ProcessPageOcr(
+        TesseractEngine engine, Pix pix, int pageNumber, PageSegMode mode)
+    {
+        using var tesPage = engine.Process(pix, mode);
+        var text = tesPage.GetText();
+        var meanConf = tesPage.GetMeanConfidence();
+        var blocks = new List<OcrBlock>();
+
+        using var wordIter = tesPage.GetIterator();
+        wordIter.Begin();
+        do
+        {
+            if (wordIter.TryGetBoundingBox(PageIteratorLevel.Word, out var bbox))
+            {
+                var wordText = wordIter.GetText(PageIteratorLevel.Word);
+                var conf = wordIter.GetConfidence(PageIteratorLevel.Word);
+                if (!string.IsNullOrWhiteSpace(wordText))
+                    blocks.Add(new OcrBlock(
+                        pageNumber,
+                        wordText.Trim(),
+                        conf / 100f,
+                        new OcrBoundingBox(bbox.X1, bbox.Y1, bbox.Width, bbox.Height),
+                        OcrBlockType.Word));
+            }
+        } while (wordIter.Next(PageIteratorLevel.Word));
+
+        return (text, meanConf, blocks);
     }
 }

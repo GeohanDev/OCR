@@ -54,7 +54,7 @@ public class DocumentService : IDocumentService
                 ErrorCodes.InvalidFileType);
 
         var hash = await _storage.ComputeHashAsync(cmd.FileStream, ct);
-        var existing = await _repo.GetByHashAsync(hash, ct);
+        var existing = await _repo.GetByHashAsync(hash, cmd.UploadedBy, ct);
         if (existing is not null)
             return Result<DocumentDto>.Failure("Duplicate document detected.", ErrorCodes.DuplicateDocument);
 
@@ -105,6 +105,15 @@ public class DocumentService : IDocumentService
             return Result<string>.Failure("Access denied.", ErrorCodes.Forbidden);
         var url = await _storage.GenerateSignedUrlAsync(doc.StoragePath, TimeSpan.FromMinutes(30), ct);
         return Result<string>.Success(url);
+    }
+
+    public async Task<Result> AssignDocumentTypeAsync(Guid documentId, Guid? documentTypeId, CancellationToken ct = default)
+    {
+        var doc = await _repo.GetByIdAsync(documentId, ct);
+        if (doc is null) return Result.Failure("Document not found.", ErrorCodes.NotFound);
+        doc.DocumentTypeId = documentTypeId;
+        await _repo.UpdateAsync(doc, ct);
+        return Result.Success();
     }
 
     public async Task<Result> UpdateStatusAsync(UpdateDocumentStatusCommand cmd, CancellationToken ct = default)

@@ -49,6 +49,25 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.Migrate();
+    // Idempotent DDL for columns added outside the formal migration history
+    db.Database.ExecuteSqlRaw(
+        "ALTER TABLE field_mapping_configs ADD COLUMN IF NOT EXISTS allow_multiple boolean NOT NULL DEFAULT false;");
+    // Replace non-partial unique index with partial (active-only) so soft-deleted fields
+    // don't block re-creation of the same field name.
+    db.Database.ExecuteSqlRaw(@"
+        DO $$
+        BEGIN
+            DROP INDEX IF EXISTS ""IX_field_mapping_configs_document_type_id_field_name"";
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_indexes
+                WHERE tablename = 'field_mapping_configs'
+                AND indexname = 'IX_field_mapping_active_name'
+            ) THEN
+                CREATE UNIQUE INDEX ""IX_field_mapping_active_name""
+                    ON field_mapping_configs (document_type_id, field_name)
+                    WHERE is_active = true;
+            END IF;
+        END $$;");
 }
 
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));

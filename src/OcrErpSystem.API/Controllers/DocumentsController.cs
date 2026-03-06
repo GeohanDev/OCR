@@ -80,6 +80,14 @@ public class DocumentsController : ControllerBase
         return Ok(new { url = result.Value });
     }
 
+    [HttpPatch("{id:guid}/type")]
+    public async Task<IActionResult> AssignDocumentType(Guid id, [FromBody] AssignDocumentTypeRequest request, CancellationToken ct)
+    {
+        var result = await _documents.AssignDocumentTypeAsync(id, request.DocumentTypeId, ct);
+        if (!result.IsSuccess) return NotFound(result.Error);
+        return NoContent();
+    }
+
     [HttpPatch("{id:guid}/status")]
     [Authorize(Policy = "ManagerAndAbove")]
     public async Task<IActionResult> UpdateStatus(Guid id, [FromBody] UpdateStatusRequest request, CancellationToken ct)
@@ -119,3 +127,5 @@ public record UploadDocumentRequest(
 public record UpdateStatusRequest(string Status, string? Notes);
 
 public record AddVersionRequest([FromForm] IFormFile? File);
+
+public record AssignDocumentTypeRequest(Guid? DocumentTypeId);

@@ -8,6 +8,7 @@ public interface IOcrService
     Task<OcrResultDto?> GetResultAsync(Guid documentId, CancellationToken ct = default);
     Task<ExtractedFieldDto> CorrectFieldAsync(Guid extractedFieldId, string correctedValue, Guid correctedBy, CancellationToken ct = default);
     Task<string?> GetRawTextAsync(Guid documentId, CancellationToken ct = default);
+    Task DeleteFieldAsync(Guid extractedFieldId, CancellationToken ct = default);
 }
 
 public record OcrPipelineResult(

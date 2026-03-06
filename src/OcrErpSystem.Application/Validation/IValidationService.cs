@@ -5,6 +5,7 @@ namespace OcrErpSystem.Application.Validation;
 public interface IValidationService
 {
     Task<ValidationSummary> ValidateDocumentAsync(Guid documentId, CancellationToken ct = default);
+    Task<IReadOnlyList<ValidationResultDto>> ValidateFieldAsync(Guid documentId, Guid extractedFieldId, CancellationToken ct = default);
     Task<IReadOnlyList<ValidationResultDto>> GetValidationResultsAsync(Guid documentId, CancellationToken ct = default);
     Task<ApprovalEligibility> CheckApprovalEligibilityAsync(Guid documentId, CancellationToken ct = default);
 }

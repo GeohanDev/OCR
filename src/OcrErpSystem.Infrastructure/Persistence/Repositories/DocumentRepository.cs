@@ -19,8 +19,9 @@ public class DocumentRepository
             .Include(d => d.Branch)
             .FirstOrDefaultAsync(d => d.Id == id, ct);
 
-    public async Task<Document?> GetByHashAsync(string fileHash, CancellationToken ct = default) =>
-        await _db.Documents.FirstOrDefaultAsync(d => d.FileHash == fileHash, ct);
+    public async Task<Document?> GetByHashAsync(string fileHash, Guid uploadedBy, CancellationToken ct = default) =>
+        await _db.Documents.FirstOrDefaultAsync(
+            d => d.FileHash == fileHash && d.UploadedBy == uploadedBy, ct);
 
     public async Task<PagedResult<Document>> ListAsync(DocumentListQuery query, CancellationToken ct = default)
     {

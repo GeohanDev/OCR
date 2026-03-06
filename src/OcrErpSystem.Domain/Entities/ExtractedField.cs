@@ -5,6 +5,7 @@ public class ExtractedField
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid OcrResultId { get; set; }
     public Guid? FieldMappingConfigId { get; set; }
+    public int SortOrder { get; set; }
     public string FieldName { get; set; } = string.Empty;
     public string? RawValue { get; set; }
     public string? NormalizedValue { get; set; }

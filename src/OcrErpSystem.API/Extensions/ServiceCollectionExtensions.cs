@@ -17,6 +17,7 @@ using OcrErpSystem.Application.OCR;
 using OcrErpSystem.Application.Storage;
 using OcrErpSystem.Application.Validation;
 using OcrErpSystem.Infrastructure.Auth;
+using OcrErpSystem.Application.Auth;
 using OcrErpSystem.Infrastructure.ERP;
 using OcrErpSystem.Infrastructure.Persistence;
 using OcrErpSystem.Infrastructure.Persistence.Repositories;
@@ -60,6 +61,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IFileStorageService, LocalFileStorageService>();
 
         // ERP
+        services.AddScoped<IAcumaticaTokenContext, AcumaticaTokenContext>();
         services.AddHttpClient<IErpIntegrationService, AcumaticaClient>(client =>
         {
             client.Timeout = TimeSpan.FromSeconds(30);
@@ -70,10 +72,14 @@ public static class ServiceCollectionExtensions
 
         // Validation
         services.AddScoped<IValidationService, ValidationService>();
+        services.AddScoped<IVendorResolutionContext, VendorResolutionContext>();
         services.AddScoped<IFieldValidator, RequiredFieldValidator>();
         services.AddScoped<IFieldValidator, ErpVendorValidator>();
+        services.AddScoped<IFieldValidator, ErpVendorNameValidator>();
         services.AddScoped<IFieldValidator, ErpCurrencyValidator>();
         services.AddScoped<IFieldValidator, ErpBranchValidator>();
+        services.AddScoped<IFieldValidator, ErpApInvoiceValidator>();
+        services.AddScoped<IFieldValidator, DynamicErpValidator>();
         services.AddScoped<IFieldValidator, FormatValidator>();
 
         // OCR Pipeline
@@ -83,6 +89,14 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IFieldNormalizer, FieldNormalizer>();
         services.AddScoped<IConfidenceScorer, ConfidenceScorer>();
         services.AddScoped<IOcrService, Infrastructure.OCR.OcrPipelineService>();
+
+        // Claude OCR engine — enabled when Anthropic:ApiKey is set in configuration.
+        // Falls back gracefully to Tesseract when the key is absent.
+        services.AddHttpClient<IClaudeOcrEngine, ClaudeOcrEngine>(client =>
+        {
+            client.BaseAddress = new Uri("https://api.anthropic.com/");
+            client.Timeout     = TimeSpan.FromMinutes(3);
+        });
 
         // Memory cache for ERP lookups
         services.AddMemoryCache();

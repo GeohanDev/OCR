@@ -13,7 +13,9 @@ public record CreateFieldMappingCommand(
     string? KeywordAnchor,
     string? PositionRule,
     bool IsRequired,
+    bool AllowMultiple,
     string? ErpMappingKey,
+    string? ErpResponseField,
     double ConfidenceThreshold,
     int DisplayOrder);
 
@@ -24,7 +26,8 @@ public record UpdateFieldMappingCommand(
     string? KeywordAnchor,
     string? PositionRule,
     bool IsRequired,
+    bool AllowMultiple,
     string? ErpMappingKey,
+    string? ErpResponseField,
     double ConfidenceThreshold,
-    int DisplayOrder,
-    bool IsActive);
+    int DisplayOrder);

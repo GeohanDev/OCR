@@ -11,7 +11,7 @@ public class OcrResultRepository
 
     public async Task<OcrResult?> GetByDocumentIdAsync(Guid documentId, CancellationToken ct = default) =>
         await _db.OcrResults
-            .Include(r => r.ExtractedFields)
+            .Include(r => r.ExtractedFields.OrderBy(f => f.SortOrder))
                 .ThenInclude(f => f.FieldMappingConfig)
             .OrderByDescending(r => r.CreatedAt)
             .FirstOrDefaultAsync(r => r.DocumentId == documentId, ct);
@@ -30,6 +30,14 @@ public class OcrResultRepository
     public async Task UpdateFieldAsync(ExtractedField field, CancellationToken ct = default)
     {
         _db.ExtractedFields.Update(field);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    public async Task DeleteFieldAsync(Guid fieldId, CancellationToken ct = default)
+    {
+        var field = await _db.ExtractedFields.FindAsync([fieldId], ct);
+        if (field is null) throw new KeyNotFoundException($"ExtractedField {fieldId} not found");
+        _db.ExtractedFields.Remove(field);
         await _db.SaveChangesAsync(ct);
     }
 }

@@ -26,15 +26,14 @@ public class DashboardService : IDashboardService
 
         int total = counts.Values.Sum();
         int pendingReview = counts[DocumentStatus.PendingReview] + counts[DocumentStatus.ReviewInProgress];
-        int approved = counts[DocumentStatus.Approved];
         int rejected = counts[DocumentStatus.Rejected];
-        int pushed = counts[DocumentStatus.Pushed];
+        int checked_ = counts[DocumentStatus.Checked];
 
         var recentQuery = new DocumentListQuery(requestingUserId, requestingUserRole, branchId, null, null, null, null, 1, 10);
         var recent = await _docs.ListAsync(recentQuery, ct);
 
         return new DashboardKpisDto(
-            total, pendingReview, approved, rejected, pushed,
+            total, pendingReview, rejected, checked_,
             recent.Items.Select(d => new RecentDocumentDto(
                 d.Id, d.OriginalFilename, d.Status.ToString(),
                 d.UploadedAt, d.UploadedByUser?.Username ?? "")).ToList());

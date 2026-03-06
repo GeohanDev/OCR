@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
+using OcrErpSystem.Application.Auth;
 using OcrErpSystem.Application.DTOs;
 using OcrErpSystem.Application.ERP;
 
@@ -16,19 +17,21 @@ public class AcumaticaClient : IErpIntegrationService
     private readonly HttpClient _http;
     private readonly IConfiguration _config;
     private readonly ILogger<AcumaticaClient> _logger;
+    private readonly IAcumaticaTokenContext _tokenContext;
     private static string? _serviceAccountToken;
     private static DateTimeOffset _tokenExpiry = DateTimeOffset.MinValue;
     private static readonly SemaphoreSlim _tokenLock = new(1, 1);
 
-    public AcumaticaClient(HttpClient http, IConfiguration config, ILogger<AcumaticaClient> logger)
+    public AcumaticaClient(HttpClient http, IConfiguration config, ILogger<AcumaticaClient> logger, IAcumaticaTokenContext tokenContext)
     {
         _http = http;
         _config = config;
         _logger = logger;
+        _tokenContext = tokenContext;
     }
 
     private string BaseUrl => _config["Acumatica:BaseUrl"] ?? throw new InvalidOperationException("Acumatica:BaseUrl not configured");
-    private string ApiVersion => _config["Acumatica:ApiVersion"] ?? "23.200.001";
+    private string ApiVersion => _config["Acumatica:ApiVersion"] ?? "24.200.001";
 
     private async Task<string> GetServiceAccountTokenAsync(CancellationToken ct)
     {
@@ -40,20 +43,43 @@ public class AcumaticaClient : IErpIntegrationService
 
             var clientId      = _config["Acumatica:ServiceAccount:ClientId"]
                                 ?? throw new InvalidOperationException("Acumatica:ServiceAccount:ClientId not configured");
+            var clientSecret  = _config["Acumatica:ServiceAccount:ClientSecret"];
             var tokenEndpoint = $"{BaseUrl}/identity/connect/token";
 
-            var request = new HttpRequestMessage(HttpMethod.Post, tokenEndpoint);
-            request.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+            var fields = new Dictionary<string, string>
             {
-                ["grant_type"]            = "client_credentials",
-                ["client_id"]             = clientId,
-                ["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-                ["client_assertion"]      = BuildServiceAssertion(clientId, tokenEndpoint),
-                ["scope"]                 = "api",
-            });
+                ["grant_type"] = "client_credentials",
+                ["client_id"]  = clientId,
+                ["scope"]      = "api",
+            };
+
+            // Prefer client_secret_post when a secret is configured (matches user-login flow).
+            // Fall back to private_key_jwt when no secret is present.
+            if (!string.IsNullOrWhiteSpace(clientSecret))
+            {
+                fields["client_secret"] = clientSecret;
+            }
+            else
+            {
+                fields["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+                fields["client_assertion"]      = BuildServiceAssertion(clientId, tokenEndpoint);
+            }
+
+            var request = new HttpRequestMessage(HttpMethod.Post, tokenEndpoint)
+            {
+                Content = new FormUrlEncodedContent(fields),
+            };
+
+            _logger.LogInformation("Service-account token request: endpoint={Endpoint} grant=client_credentials client_id={ClientId} using={Method}",
+                tokenEndpoint, clientId, string.IsNullOrWhiteSpace(clientSecret) ? "private_key_jwt" : "client_secret_post");
 
             var response = await _http.SendAsync(request, ct);
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogError("Acumatica token endpoint returned {Status}: {Body}", (int)response.StatusCode, errBody);
+                response.EnsureSuccessStatusCode();
+            }
             var json = await response.Content.ReadAsStringAsync(ct);
             var doc  = JsonDocument.Parse(json);
             _serviceAccountToken = doc.RootElement.GetProperty("access_token").GetString()!;
@@ -101,7 +127,17 @@ public class AcumaticaClient : IErpIntegrationService
 
     private async Task SetAuthHeaderAsync(CancellationToken ct)
     {
-        var token = await GetServiceAccountTokenAsync(ct);
+        string token;
+        if (!string.IsNullOrWhiteSpace(_tokenContext.ForwardedToken))
+        {
+            _logger.LogInformation("ERP call: using forwarded user Acumatica token");
+            token = _tokenContext.ForwardedToken;
+        }
+        else
+        {
+            _logger.LogInformation("ERP call: no forwarded token — falling back to service-account");
+            token = await GetServiceAccountTokenAsync(ct);
+        }
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
     }
 
@@ -127,6 +163,99 @@ public class AcumaticaClient : IErpIntegrationService
         {
             _logger.LogError(ex, "ERP vendor lookup failed for {VendorId}", vendorId);
             return new ErpLookupResult<VendorDto>(false, null, ex.Message);
+        }
+    }
+
+    public async Task<ErpLookupResult<VendorDto>> LookupVendorByNameAsync(string vendorName, CancellationToken ct = default)
+    {
+        try
+        {
+            var all = await GetAllVendorsAsync(ct: ct);
+            // Normalize internal whitespace so "ABC  SDN BHD" matches "ABC SDN BHD".
+            static string Norm(string s) =>
+                string.Join(" ", s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            var normalizedInput = Norm(vendorName.Trim());
+            var match = all.FirstOrDefault(v =>
+                string.Equals(Norm(v.VendorName), normalizedInput, StringComparison.OrdinalIgnoreCase));
+            if (match is null)
+                return new ErpLookupResult<VendorDto>(false, null, "Vendor not found");
+            return new ErpLookupResult<VendorDto>(true, match, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ERP vendor name lookup failed for {VendorName}", vendorName);
+            return new ErpLookupResult<VendorDto>(false, null, ex.Message);
+        }
+    }
+
+
+    public async Task<IReadOnlyList<VendorDto>> GetAllVendorsAsync(int? top = null, CancellationToken ct = default)
+    {
+        try
+        {
+            await SetAuthHeaderAsync(ct);
+            var topClause = top.HasValue ? $"&$top={top.Value}" : string.Empty;
+            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/Vendor?$select=VendorID,VendorName,Status{topClause}";
+            var response = await _http.GetAsync(url, ct);
+            response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var arr = JsonDocument.Parse(json).RootElement;
+            var vendors = new List<VendorDto>();
+            foreach (var v in arr.EnumerateArray())
+                vendors.Add(new VendorDto(
+                    v.GetProperty("VendorID").GetProperty("value").GetString()!,
+                    v.GetProperty("VendorName").GetProperty("value").GetString()!,
+                    v.GetProperty("Status").GetProperty("value").GetString() == "Active"));
+            return vendors;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to fetch all vendors from Acumatica");
+            return [];
+        }
+    }
+
+    public async Task<ErpLookupResult<ApInvoiceDto>> LookupApInvoiceAsync(string invoiceNbr, CancellationToken ct = default)
+    {
+        try
+        {
+            await SetAuthHeaderAsync(ct);
+            // Acumatica 23.x+ exposes AP invoices as "Bill" (not "APInvoice").
+            // Omit $select so unknown/renamed fields don't cause 400/parse errors.
+            var filter = Uri.EscapeDataString($"RefNbr eq '{invoiceNbr}'");
+            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/Bill?$filter={filter}&$top=1";
+            _logger.LogInformation("AP Invoice lookup → {Url}", url);
+            var response = await _http.GetAsync(url, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("AP Invoice lookup {InvoiceNbr} → {Status}: {Err}", invoiceNbr, (int)response.StatusCode, errBody);
+                return new ErpLookupResult<ApInvoiceDto>(false, null, $"ERP returned HTTP {(int)response.StatusCode}");
+            }
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var arr = JsonDocument.Parse(json).RootElement;
+            if (arr.GetArrayLength() == 0)
+                return new ErpLookupResult<ApInvoiceDto>(false, null, "Invoice not found");
+            var first = arr[0];
+
+            static string Str(JsonElement el, string key) =>
+                el.TryGetProperty(key, out var p) && p.TryGetProperty("value", out var v) ? v.GetString() ?? "" : "";
+            static decimal Dec(JsonElement el, string key) =>
+                el.TryGetProperty(key, out var p) && p.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDecimal() : 0m;
+
+            var invoice = new ApInvoiceDto(
+                Str(first, "RefNbr"),
+                Str(first, "VendorID"),
+                Str(first, "DocDate"),
+                Dec(first, "CuryOrigDocAmt"),
+                Str(first, "Status"),
+                Str(first, "DocType"));
+            return new ErpLookupResult<ApInvoiceDto>(true, invoice, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ERP AP invoice lookup failed for {InvoiceNbr}", invoiceNbr);
+            return new ErpLookupResult<ApInvoiceDto>(false, null, ex.Message);
         }
     }
 
@@ -209,6 +338,144 @@ public class AcumaticaClient : IErpIntegrationService
         }
     }
 
+    // ── Entity catalog ────────────────────────────────────────────────────────
+    // Hardcoded list of known Acumatica entities + their filterable OData fields.
+    // Add new entries here as the integration grows.
+    private static readonly IReadOnlyList<ErpEntityDto> _entityCatalog =
+    [
+        new("Vendor",         "Vendor",          ["VendorID", "VendorName", "Status", "CurrencyID", "TaxRegistrationID"]),
+        new("Customer",       "Customer",        ["CustomerID", "CustomerName", "Status", "CurrencyID"]),
+        new("Bill",           "AP Invoice (Bill)", ["RefNbr", "VendorRef", "VendorID", "VendorName", "DocDate", "Status", "DocType", "CuryID", "CuryOrigDocAmt"]),
+        new("SOInvoice",      "Sales Invoice",   ["RefNbr", "CustomerID", "CustomerName", "DocDate", "Status", "DocType"]),
+        new("PurchaseOrder",  "Purchase Order",  ["OrderNbr", "VendorID", "VendorName", "Status", "CuryID", "CuryOrderTotal"]),
+        new("Currency",       "Currency",        ["CurrencyID", "Description"]),
+        new("Branch",         "Branch",          ["BranchID", "BranchName", "Active", "LedgerID"]),
+        new("InventoryItem",  "Inventory Item",  ["InventoryCD", "Descr", "ItemStatus", "ItemClass"]),
+    ];
+
+    public IReadOnlyList<ErpEntityDto> GetEntityCatalog() => _entityCatalog;
+
+    // Entity name aliases — normalises legacy/renamed entity names stored in field configs.
+    // APInvoice was renamed to Bill in Acumatica 23.x.
+    private static readonly Dictionary<string, string> _entityAliases =
+        new(StringComparer.OrdinalIgnoreCase) { ["APInvoice"] = "Bill" };
+
+    public async Task<ErpLookupResult<IReadOnlyDictionary<string, string>>> LookupGenericAsync(
+        string entity, string field, string value, CancellationToken ct = default)
+    {
+        // Apply alias so configs with "APInvoice:VendorRef" still work after the rename.
+        if (_entityAliases.TryGetValue(entity, out var aliasedEntity))
+        {
+            _logger.LogInformation("Entity alias: {Old} → {New}", entity, aliasedEntity);
+            entity = aliasedEntity;
+        }
+
+        try
+        {
+            await SetAuthHeaderAsync(ct);
+            // Normalise the extracted value: trim whitespace, then try case-insensitive match.
+            // Some Acumatica versions don't support tolower() on all field types, so fall back
+            // to an exact eq filter when the server returns 400/500.
+            // $select is intentionally omitted — restricting to a single field can prevent
+            // Acumatica from returning filterable results for complex/linked fields like VendorRef.
+            var normalizedValue = value.Trim();
+            var filterCI    = Uri.EscapeDataString($"tolower({field}) eq '{normalizedValue.ToLowerInvariant()}'");
+            var filterExact = Uri.EscapeDataString($"{field} eq '{normalizedValue}'");
+            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/{entity}?$filter={filterCI}&$top=1";
+            _logger.LogInformation("Generic ERP lookup → {Url}", url);
+            var response = await _http.GetAsync(url, ct);
+
+            // Acumatica returns 400 or 500 when tolower() is unsupported — retry with exact match.
+            if (response.StatusCode == System.Net.HttpStatusCode.BadRequest ||
+                response.StatusCode == System.Net.HttpStatusCode.InternalServerError)
+            {
+                _logger.LogDebug("tolower() not supported for {Entity}.{Field} — retrying with exact match", entity, field);
+                url = $"{BaseUrl}/entity/Default/{ApiVersion}/{entity}?$filter={filterExact}&$top=1";
+                _logger.LogInformation("Generic ERP lookup (exact) → {Url}", url);
+                response = await _http.GetAsync(url, ct);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync(ct);
+                // Extract human-readable message from Acumatica JSON error body if available.
+                string acuMsg;
+                try
+                {
+                    var errDoc = JsonDocument.Parse(errBody);
+                    acuMsg = errDoc.RootElement.TryGetProperty("exceptionMessage", out var em) ? em.GetString()!
+                           : errDoc.RootElement.TryGetProperty("message", out var m) ? m.GetString()!
+                           : $"HTTP {(int)response.StatusCode}";
+                }
+                catch { acuMsg = $"HTTP {(int)response.StatusCode}"; }
+
+                _logger.LogWarning("Generic ERP lookup {Entity}.{Field}='{Value}' → {Status}: {Err}",
+                    entity, field, normalizedValue, (int)response.StatusCode, errBody);
+                return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null,
+                    $"Acumatica error: {acuMsg}");
+            }
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var arr = JsonDocument.Parse(json).RootElement;
+            if (arr.GetArrayLength() == 0)
+                return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null,
+                    $"No {entity} record found where {field} = \"{normalizedValue}\"");
+
+            // Flatten the first record: each Acumatica field is { "value": "..." }
+            var record = new Dictionary<string, string>();
+            foreach (var prop in arr[0].EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.Object &&
+                    prop.Value.TryGetProperty("value", out var val))
+                    record[prop.Name] = val.ToString();
+            }
+            return new ErpLookupResult<IReadOnlyDictionary<string, string>>(true, record, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Generic ERP lookup failed: {Entity}.{Field}='{Value}'", entity, field, value.Trim());
+            return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null, ex.Message);
+        }
+    }
+
+    public async Task<ErpLookupResult<IReadOnlyDictionary<string, string>>> ProbeEntityAsync(
+        string entity, CancellationToken ct = default)
+    {
+        try
+        {
+            await SetAuthHeaderAsync(ct);
+            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/{entity}?$top=1";
+            _logger.LogInformation("Probe entity → {Url}", url);
+            var response = await _http.GetAsync(url, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("Probe {Entity} → {Status}: {Err}", entity, (int)response.StatusCode, errBody);
+                return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null,
+                    $"HTTP {(int)response.StatusCode}: {errBody}");
+            }
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var arr = JsonDocument.Parse(json).RootElement;
+            if (arr.GetArrayLength() == 0)
+                return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null,
+                    "Entity exists but returned 0 records");
+
+            var record = new Dictionary<string, string>();
+            foreach (var prop in arr[0].EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.Object &&
+                    prop.Value.TryGetProperty("value", out var val))
+                    record[prop.Name] = val.ToString();
+            }
+            return new ErpLookupResult<IReadOnlyDictionary<string, string>>(true, record, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Probe entity failed: {Entity}", entity);
+            return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null, ex.Message);
+        }
+    }
+
     public async Task<ErpPushResult> PushDocumentAsync(Guid documentId, CancellationToken ct = default)
     {
         _logger.LogInformation("Pushing document {DocumentId} to Acumatica", documentId);
@@ -222,7 +489,9 @@ public class AcumaticaClient : IErpIntegrationService
         try
         {
             await SetAuthHeaderAsync(ct);
-            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/Users?$select=Username,FullName,Email,Roles,BranchID";
+            // Users live under the UserManagement endpoint (not Default entity).
+            // Acumatica 25.1 exposes: GET /entity/UserManagement/25.100.001/Users
+            var url = $"{BaseUrl}/entity/UserManagement/{ApiVersion}/Users?$select=Username,FullName,Email,Roles,DefaultBranchID";
             var response = await _http.GetAsync(url, ct);
             response.EnsureSuccessStatusCode();
             var json = await response.Content.ReadAsStringAsync(ct);
@@ -238,10 +507,10 @@ public class AcumaticaClient : IErpIntegrationService
                 users.Add(new AcumaticaUserDto(
                     u.GetProperty("Username").GetProperty("value").GetString()!,
                     u.GetProperty("Username").GetProperty("value").GetString()!,
-                    u.GetProperty("FullName").GetProperty("value").GetString() ?? "",
+                    u.TryGetProperty("FullName", out var fn) ? fn.GetProperty("value").GetString() ?? "" : "",
                     u.TryGetProperty("Email", out var em) ? em.GetProperty("value").GetString() : null,
                     roles,
-                    u.TryGetProperty("BranchID", out var br) ? br.GetProperty("value").GetString() : null));
+                    u.TryGetProperty("DefaultBranchID", out var br) ? br.GetProperty("value").GetString() : null));
             }
             return users;
         }

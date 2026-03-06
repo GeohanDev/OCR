@@ -6,6 +6,7 @@ const statusConfig: Record<string, { label: string; classes: string }> = {
   Approved:       { label: 'Approved',       classes: 'bg-green-100 text-green-700' },
   Rejected:       { label: 'Rejected',       classes: 'bg-red-100 text-red-700' },
   Pushed:         { label: 'Pushed to ERP',  classes: 'bg-purple-100 text-purple-700' },
+  Checked:        { label: 'Checked',        classes: 'bg-teal-100 text-teal-700' },
 };
 
 export default function StatusBadge({ status }: { status: string }) {

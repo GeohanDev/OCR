@@ -14,6 +14,7 @@ export default function LoginPage() {
   const authError = searchParams.get('error');
   const authErrorMessages: Record<string, string> = {
     auth_failed: 'Sign-in failed. Please try again.',
+    state_mismatch: 'Sign-in failed: response did not match the original request. Please try again.',
     token_exchange_failed: 'Could not exchange the authorisation code — check that Acumatica is configured correctly.',
     empty_token_response: 'Acumatica returned an empty token. Check your OAuth client configuration.',
     no_jwt_in_token_response: 'Acumatica did not return a JWT. Ensure the Connected Application has the openid scope enabled.',
@@ -42,12 +43,16 @@ export default function LoginPage() {
   const handleAcumaticaLogin = () => {
     const clientId = import.meta.env.VITE_ACUMATICA_CLIENT_ID ?? '';
     const redirectUri = `${window.location.origin}/auth/callback`;
+    const state = crypto.randomUUID();
+    sessionStorage.setItem('oauth_state', state);
     const url =
       `${import.meta.env.VITE_ACUMATICA_URL}/identity/connect/authorize` +
       `?client_id=${encodeURIComponent(clientId)}` +
       `&response_type=code` +
-      `&scope=${encodeURIComponent('openid api')}` +
-      `&redirect_uri=${encodeURIComponent(redirectUri)}`;
+      `&scope=${encodeURIComponent('api openid profile email')}` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&state=${encodeURIComponent(state)}` +
+      `&prompt=login`;
     window.location.href = url;
   };
 

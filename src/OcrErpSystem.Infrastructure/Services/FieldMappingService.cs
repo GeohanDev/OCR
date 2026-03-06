@@ -34,7 +34,7 @@ public class FieldMappingService : IFieldMappingService
 
     public async Task<IReadOnlyList<FieldMappingConfigDto>> GetFieldMappingsAsync(Guid documentTypeId, CancellationToken ct = default)
     {
-        var configs = await _repo.GetFieldMappingsAsync(documentTypeId, false, ct);
+        var configs = await _repo.GetFieldMappingsAsync(documentTypeId, true, ct);
         return configs.Select(MapConfigDto).ToList();
     }
 
@@ -49,7 +49,9 @@ public class FieldMappingService : IFieldMappingService
             KeywordAnchor = cmd.KeywordAnchor,
             PositionRule = cmd.PositionRule,
             IsRequired = cmd.IsRequired,
+            AllowMultiple = cmd.AllowMultiple,
             ErpMappingKey = cmd.ErpMappingKey,
+            ErpResponseField = cmd.ErpResponseField,
             ConfidenceThreshold = (decimal)cmd.ConfidenceThreshold,
             DisplayOrder = cmd.DisplayOrder,
             IsActive = true,
@@ -69,10 +71,11 @@ public class FieldMappingService : IFieldMappingService
         config.KeywordAnchor = cmd.KeywordAnchor;
         config.PositionRule = cmd.PositionRule;
         config.IsRequired = cmd.IsRequired;
+        config.AllowMultiple = cmd.AllowMultiple;
         config.ErpMappingKey = cmd.ErpMappingKey;
+        config.ErpResponseField = cmd.ErpResponseField;
         config.ConfidenceThreshold = (decimal)cmd.ConfidenceThreshold;
         config.DisplayOrder = cmd.DisplayOrder;
-        config.IsActive = cmd.IsActive;
         config.UpdatedAt = DateTimeOffset.UtcNow;
         await _repo.UpdateFieldMappingAsync(config, ct);
         return MapConfigDto(config);
@@ -101,6 +104,6 @@ public class FieldMappingService : IFieldMappingService
 
     private static FieldMappingConfigDto MapConfigDto(FieldMappingConfig c) =>
         new(c.Id, c.DocumentTypeId, c.FieldName, c.DisplayLabel, c.RegexPattern,
-            c.KeywordAnchor, c.PositionRule, c.IsRequired, c.ErpMappingKey,
-            (double)c.ConfidenceThreshold, c.DisplayOrder, c.IsActive, c.CreatedAt, c.UpdatedAt);
+            c.KeywordAnchor, c.PositionRule, c.IsRequired, c.AllowMultiple, c.ErpMappingKey,
+            c.ErpResponseField, (double)c.ConfidenceThreshold, c.DisplayOrder, c.IsActive, c.CreatedAt, c.UpdatedAt);
 }

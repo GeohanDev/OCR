@@ -22,6 +22,13 @@ public class ValidationRepository
         await _db.SaveChangesAsync(ct);
     }
 
+    public async Task DeleteByExtractedFieldIdAsync(Guid extractedFieldId, CancellationToken ct = default)
+    {
+        var existing = await _db.ValidationResults.Where(v => v.ExtractedFieldId == extractedFieldId).ToListAsync(ct);
+        _db.ValidationResults.RemoveRange(existing);
+        await _db.SaveChangesAsync(ct);
+    }
+
     public async Task AddRangeAsync(IEnumerable<Domain.Entities.ValidationResult> results, CancellationToken ct = default)
     {
         await _db.ValidationResults.AddRangeAsync(results, ct);

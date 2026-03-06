@@ -49,6 +49,20 @@ public class OcrController : ControllerBase
         return Ok(new { rawText = text });
     }
 
+    [HttpDelete("{documentId:guid}/fields/{fieldId:guid}")]
+    public async Task<IActionResult> DeleteField(Guid documentId, Guid fieldId, CancellationToken ct)
+    {
+        try
+        {
+            await _ocr.DeleteFieldAsync(fieldId, ct);
+            return NoContent();
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound("Field not found.");
+        }
+    }
+
     [HttpPatch("{documentId:guid}/fields/{fieldId:guid}")]
     public async Task<IActionResult> CorrectField(Guid documentId, Guid fieldId, [FromBody] CorrectFieldRequest request, CancellationToken ct)
     {

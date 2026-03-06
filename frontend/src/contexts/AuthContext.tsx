@@ -7,7 +7,7 @@ interface AuthContextValue {
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  login: (token: string) => Promise<void>;
+  login: (token: string, acumaticaToken?: string) => Promise<void>;
   logout: () => void;
   isManagerOrAbove: boolean;
   isAdmin: boolean;
@@ -15,7 +15,7 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-// Key used to prevent auto-re-login after an explicit sign-out
+// Persisted in localStorage so explicit sign-out survives browser restarts.
 const LOGGED_OUT_KEY = 'auth-logged-out';
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -23,34 +23,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // If the user explicitly signed out this session, show the login page
-    if (sessionStorage.getItem(LOGGED_OUT_KEY)) {
+    // If the user explicitly signed out, show the login page (persists across restarts)
+    if (localStorage.getItem(LOGGED_OUT_KEY)) {
       setIsLoading(false);
       return;
     }
 
     const token = sessionStorage.getItem('access_token');
     if (token) {
-      fetchCurrentUser().catch(() => autoLogin());
+      // Validate the stored token; if invalid, clear it and show login page.
+      fetchCurrentUser().catch(() => {
+        sessionStorage.removeItem('access_token');
+        setIsLoading(false);
+      });
     } else {
-      autoLogin();
+      // No token — show the login page. User must sign in explicitly.
+      setIsLoading(false);
     }
   }, []);
 
-  // Silently obtain a demo JWT so every API call is authenticated.
-  // Falls back gracefully if demo mode is disabled or the API is down.
-  const autoLogin = async () => {
-    try {
-      const res = await apiClient.post('/auth/demo-login');
-      sessionStorage.setItem('access_token', res.data.accessToken);
-      const { data } = await apiClient.get('/auth/me');
-      setUser(data);
-    } catch {
-      // Demo mode disabled or API unavailable — user will see the login page
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  // Refresh user info when the tab regains focus so role/permission changes
+  // made by an admin take effect without requiring a full re-login.
+  useEffect(() => {
+    const onFocus = () => {
+      if (sessionStorage.getItem('access_token')) {
+        fetchCurrentUser().catch(() => {});
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
 
   const fetchCurrentUser = async () => {
     try {
@@ -64,16 +66,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const login = async (token: string) => {
-    sessionStorage.removeItem(LOGGED_OUT_KEY);
+  const login = async (token: string, acumaticaToken?: string) => {
+    localStorage.removeItem(LOGGED_OUT_KEY);
     sessionStorage.setItem('access_token', token);
+    if (acumaticaToken) sessionStorage.setItem('acumatica_token', acumaticaToken);
     setIsLoading(true);
     await fetchCurrentUser();
   };
 
   const logout = () => {
     sessionStorage.removeItem('access_token');
-    sessionStorage.setItem(LOGGED_OUT_KEY, '1');
+    sessionStorage.removeItem('acumatica_token');
+    localStorage.setItem(LOGGED_OUT_KEY, '1');
     setUser(null);
     window.location.href = '/login';
   };

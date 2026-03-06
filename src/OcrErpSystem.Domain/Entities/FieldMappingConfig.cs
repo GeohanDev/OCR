@@ -10,7 +10,9 @@ public class FieldMappingConfig
     public string? KeywordAnchor { get; set; }
     public string? PositionRule { get; set; } // JSON
     public bool IsRequired { get; set; } = false;
+    public bool AllowMultiple { get; set; } = false;
     public string? ErpMappingKey { get; set; }
+    public string? ErpResponseField { get; set; }  // JSON key in ERP response to show on pass (e.g. "vendorId", "RefNbr")
     public decimal ConfidenceThreshold { get; set; } = 0.75m;
     public int DisplayOrder { get; set; } = 0;
     public bool IsActive { get; set; } = true;

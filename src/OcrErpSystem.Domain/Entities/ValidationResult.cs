@@ -12,6 +12,7 @@ public class ValidationResult
     public ValidationStatus Status { get; set; }
     public string? Message { get; set; }
     public string? ErpReference { get; set; } // JSON
+    public string? ErpResponseField { get; set; }  // which key in ErpReference to surface in the UI
     public DateTimeOffset ValidatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     public Document? Document { get; set; }

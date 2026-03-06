@@ -81,7 +81,9 @@ public class AppDbContext : DbContext
             e.Property(x => x.KeywordAnchor).HasColumnName("keyword_anchor").HasMaxLength(500);
             e.Property(x => x.PositionRule).HasColumnName("position_rule").HasColumnType("jsonb");
             e.Property(x => x.IsRequired).HasColumnName("is_required");
+            e.Property(x => x.AllowMultiple).HasColumnName("allow_multiple").HasDefaultValue(false);
             e.Property(x => x.ErpMappingKey).HasColumnName("erp_mapping_key").HasMaxLength(250);
+            e.Property(x => x.ErpResponseField).HasColumnName("erp_response_field").HasMaxLength(250);
             e.Property(x => x.ConfidenceThreshold).HasColumnName("confidence_threshold").HasPrecision(5, 2);
             e.Property(x => x.DisplayOrder).HasColumnName("display_order");
             e.Property(x => x.IsActive).HasColumnName("is_active");
@@ -189,6 +191,7 @@ public class AppDbContext : DbContext
             e.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(50);
             e.Property(x => x.Message).HasColumnName("message");
             e.Property(x => x.ErpReference).HasColumnName("erp_reference").HasColumnType("jsonb");
+            e.Property(x => x.ErpResponseField).HasColumnName("erp_response_field").HasMaxLength(250);
             e.Property(x => x.ValidatedAt).HasColumnName("validated_at");
             e.HasIndex(x => x.DocumentId);
             e.HasOne(x => x.Document).WithMany(d => d.ValidationResults).HasForeignKey(x => x.DocumentId).OnDelete(DeleteBehavior.Cascade);

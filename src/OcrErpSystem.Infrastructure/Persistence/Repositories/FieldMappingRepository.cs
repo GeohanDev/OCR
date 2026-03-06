@@ -48,7 +48,9 @@ public class FieldMappingRepository
         var config = await _db.FieldMappingConfigs.FindAsync([id], ct);
         if (config is not null)
         {
-            _db.FieldMappingConfigs.Remove(config);
+            config.IsActive = false;
+            config.UpdatedAt = DateTimeOffset.UtcNow;
+            _db.FieldMappingConfigs.Update(config);
             await _db.SaveChangesAsync(ct);
         }
     }

@@ -380,6 +380,9 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                         .HasColumnType("text")
                         .HasColumnName("raw_value");
 
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("integer");
+
                     b.HasKey("Id");
 
                     b.HasIndex("CorrectedBy");
@@ -398,6 +401,12 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id")
                         .HasDefaultValueSql("gen_random_uuid()");
+
+                    b.Property<bool>("AllowMultiple")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("allow_multiple");
 
                     b.Property<decimal>("ConfidenceThreshold")
                         .HasPrecision(5, 2)
@@ -425,6 +434,11 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                         .HasMaxLength(250)
                         .HasColumnType("character varying(250)")
                         .HasColumnName("erp_mapping_key");
+
+                    b.Property<string>("ErpResponseField")
+                        .HasMaxLength(250)
+                        .HasColumnType("character varying(250)")
+                        .HasColumnName("erp_response_field");
 
                     b.Property<string>("FieldName")
                         .IsRequired()
@@ -633,6 +647,11 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                     b.Property<string>("ErpReference")
                         .HasColumnType("jsonb")
                         .HasColumnName("erp_reference");
+
+                    b.Property<string>("ErpResponseField")
+                        .HasMaxLength(250)
+                        .HasColumnType("character varying(250)")
+                        .HasColumnName("erp_response_field");
 
                     b.Property<Guid?>("ExtractedFieldId")
                         .HasColumnType("uuid")

@@ -52,7 +52,8 @@ export type DocumentStatus =
   | 'ReviewInProgress'
   | 'Approved'
   | 'Rejected'
-  | 'Pushed';
+  | 'Pushed'
+  | 'Checked';
 
 export interface OcrResult {
   id: string;
@@ -95,6 +96,7 @@ export interface ValidationResult {
   status: 'Passed' | 'Failed' | 'Warning' | 'Skipped';
   message?: string;
   erpReference?: unknown;
+  erpResponseField?: string;
   validatedAt: string;
 }
 
@@ -126,7 +128,9 @@ export interface FieldMappingConfig {
   keywordAnchor?: string;
   positionRule?: unknown;
   isRequired: boolean;
+  allowMultiple: boolean;
   erpMappingKey?: string;
+  erpResponseField?: string;
   confidenceThreshold: number;
   displayOrder: number;
   isActive: boolean;
@@ -134,12 +138,17 @@ export interface FieldMappingConfig {
   updatedAt: string;
 }
 
+export interface ErpEntity {
+  entityName: string;
+  displayName: string;
+  fields: string[];
+}
+
 export interface DashboardKpis {
   totalDocuments: number;
   pendingReview: number;
-  approved: number;
   failed: number;
-  pushedToErp: number;
+  checked: number;
   recentDocuments: RecentDocument[];
 }
 

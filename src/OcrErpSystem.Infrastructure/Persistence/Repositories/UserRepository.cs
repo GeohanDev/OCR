@@ -41,7 +41,7 @@ public class UserRepository
             existing.Username = user.Username;
             existing.DisplayName = user.DisplayName;
             existing.Email = user.Email;
-            existing.Role = user.Role;
+            // Role is managed exclusively by admins via PATCH /users/{id}/role — never overwrite.
             existing.BranchId = user.BranchId;
             existing.IsActive = user.IsActive;
             existing.LastSyncedAt = user.LastSyncedAt;

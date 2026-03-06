@@ -40,6 +40,7 @@ public class AuthController : ControllerBase
         [FromServices] IHttpClientFactory httpClientFactory,
         [FromServices] IConfiguration config,
         [FromServices] UserRepository userRepo,
+        [FromServices] ILogger<AuthController> logger,
         CancellationToken ct)
     {
         var baseUrl  = config["Acumatica:BaseUrl"]
@@ -47,24 +48,42 @@ public class AuthController : ControllerBase
         var clientId = config["Acumatica:ServiceAccount:ClientId"]
                        ?? throw new InvalidOperationException("Acumatica:ServiceAccount:ClientId not configured");
 
-        // Exchange authorization code for tokens using private_key_jwt client authentication.
+        var clientSecret  = config["Acumatica:ServiceAccount:ClientSecret"];
         var tokenEndpoint = $"{baseUrl}/identity/connect/token";
         var http          = httpClientFactory.CreateClient();
-        var tokenRequest  = new FormUrlEncodedContent(new Dictionary<string, string>
+
+        // Prefer client_secret_post when a secret is configured; fall back to private_key_jwt.
+        var formFields = new Dictionary<string, string>
         {
-            ["grant_type"]            = "authorization_code",
-            ["code"]                  = request.Code,
-            ["redirect_uri"]          = request.RedirectUri,
-            ["client_id"]             = clientId,
-            ["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-            ["client_assertion"]      = BuildClientAssertion(config, clientId, tokenEndpoint),
-        });
+            ["grant_type"]   = "authorization_code",
+            ["code"]         = request.Code,
+            ["redirect_uri"] = request.RedirectUri,
+            ["client_id"]    = clientId,
+        };
+
+        if (!string.IsNullOrWhiteSpace(clientSecret))
+        {
+            formFields["client_secret"] = clientSecret;
+            logger.LogInformation("Token exchange using client_secret_post");
+        }
+        else
+        {
+            formFields["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+            formFields["client_assertion"]      = BuildClientAssertion(config, clientId, tokenEndpoint);
+            logger.LogInformation("Token exchange using private_key_jwt");
+        }
+
+        var tokenRequest = new FormUrlEncodedContent(formFields);
         tokenRequest.Headers.ContentType = new MediaTypeHeaderValue("application/x-www-form-urlencoded");
 
-        var tokenResponse = await http.PostAsync($"{baseUrl}/identity/connect/token", tokenRequest, ct);
+        logger.LogInformation("Token exchange: client_id={ClientId} redirect_uri={RedirectUri} endpoint={Endpoint}",
+            clientId, request.RedirectUri, tokenEndpoint);
+
+        var tokenResponse = await http.PostAsync(tokenEndpoint, tokenRequest, ct);
         if (!tokenResponse.IsSuccessStatusCode)
         {
             var err = await tokenResponse.Content.ReadAsStringAsync(ct);
+            logger.LogWarning("Token exchange failed ({Status}): {Error}", (int)tokenResponse.StatusCode, err);
             return Unauthorized(new { error = "token_exchange_failed", detail = err });
         }
 
@@ -104,14 +123,44 @@ public class AuthController : ControllerBase
             LastSyncedAt    = DateTimeOffset.UtcNow,
         }, ct);
 
-        // Send the JWT (access or id_token) as the bearer — our middleware can validate it.
-        // Also return the opaque access_token separately in case it is needed for Acumatica API calls.
+        // Fetch the local user after upsert to get their current role
+        // (may be manually overridden by an admin).
+        var localUser = await userRepo.GetByAcumaticaIdAsync(sub, ct)
+                     ?? await userRepo.GetByUsernameAsync(username, ct);
+        if (localUser is null)
+            return StatusCode(500, new { error = "user_not_found_after_upsert" });
+
+        // Issue our own HS256 session JWT so the frontend always holds a token
+        // that our SmartBearer → Demo scheme can validate locally — without needing
+        // to hit Acumatica's JWKS endpoint on every request.
+        // The Acumatica access_token (opaque reference token) is returned separately
+        // for any direct Acumatica API calls the client may need to make.
+        var sessionSigningKey = config["Demo:SigningKey"];
+        if (string.IsNullOrWhiteSpace(sessionSigningKey))
+            return StatusCode(500, new { error = "session_signing_key_missing" });
+
+        var sessionKey   = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(sessionSigningKey));
+        var sessionCreds = new SigningCredentials(sessionKey, SecurityAlgorithms.HmacSha256);
+        var sessionClaims = new[]
+        {
+            new Claim("sub",                sub),
+            new Claim("preferred_username", username),
+            new Claim("name",               display),
+            new Claim("email",              email ?? string.Empty),
+            new Claim("role",               localUser.Role.ToString()),
+        };
+
+        var sessionJwt = new JwtSecurityToken(
+            claims:            sessionClaims,
+            expires:           DateTime.UtcNow.AddHours(8),
+            signingCredentials: sessionCreds);
+
         return Ok(new
         {
-            accessToken       = jwtRaw,
-            acumaticaToken    = tokenData.AccessToken,
-            refreshToken      = tokenData.RefreshToken,
-            expiresIn         = tokenData.ExpiresIn,
+            accessToken    = new JwtSecurityTokenHandler().WriteToken(sessionJwt),
+            acumaticaToken = tokenData.AccessToken,
+            refreshToken   = tokenData.RefreshToken,
+            expiresIn      = 28800,
         });
     }
 
@@ -214,16 +263,26 @@ public class AuthController : ControllerBase
         var clientId = config["Acumatica:ServiceAccount:ClientId"]
                        ?? throw new InvalidOperationException("Acumatica:ServiceAccount:ClientId not configured");
 
+        var clientSecret2 = config["Acumatica:ServiceAccount:ClientSecret"];
         var tokenEndpoint = $"{baseUrl}/identity/connect/token";
         var http          = httpClientFactory.CreateClient();
-        var form          = new FormUrlEncodedContent(new Dictionary<string, string>
+
+        var refreshFields = new Dictionary<string, string>
         {
-            ["grant_type"]            = "refresh_token",
-            ["refresh_token"]         = request.RefreshToken,
-            ["client_id"]             = clientId,
-            ["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-            ["client_assertion"]      = BuildClientAssertion(config, clientId, tokenEndpoint),
-        });
+            ["grant_type"]    = "refresh_token",
+            ["refresh_token"] = request.RefreshToken,
+            ["client_id"]     = clientId,
+        };
+
+        if (!string.IsNullOrWhiteSpace(clientSecret2))
+            refreshFields["client_secret"] = clientSecret2;
+        else
+        {
+            refreshFields["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+            refreshFields["client_assertion"]      = BuildClientAssertion(config, clientId, tokenEndpoint);
+        }
+
+        var form = new FormUrlEncodedContent(refreshFields);
 
         var response = await http.PostAsync($"{baseUrl}/identity/connect/token", form, ct);
         if (!response.IsSuccessStatusCode)

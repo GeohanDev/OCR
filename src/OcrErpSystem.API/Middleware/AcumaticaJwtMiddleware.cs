@@ -24,8 +24,14 @@ public class AcumaticaJwtMiddleware
     public async Task InvokeAsync(
         HttpContext   context,
         ICurrentUserContext currentUser,
+        IAcumaticaTokenContext tokenContext,
         UserRepository userRepo)
     {
+        // Capture the forwarded Acumatica token so AcumaticaClient can use it
+        // instead of needing a separate service-account client_credentials token.
+        var forwarded = context.Request.Headers["X-Acumatica-Token"].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(forwarded))
+            tokenContext.ForwardedToken = forwarded;
         if (context.User.Identity?.IsAuthenticated == true
             && currentUser is CurrentUserContext mutableCtx)
         {
@@ -49,6 +55,16 @@ public class AcumaticaJwtMiddleware
                         mutableCtx.Username = user.Username;
                         mutableCtx.Role     = user.Role.ToString();
                         mutableCtx.BranchId = user.BranchId;
+
+                        // Replace the JWT role claim with the DB role so that
+                        // [Authorize(Policy = "...")] always reflects the current
+                        // role even after an admin changes it — no re-login required.
+                        if (context.User.Identity is ClaimsIdentity identity)
+                        {
+                            var existingRole = identity.FindFirst(ClaimTypes.Role);
+                            if (existingRole is not null) identity.RemoveClaim(existingRole);
+                            identity.AddClaim(new Claim(ClaimTypes.Role, user.Role.ToString()));
+                        }
                     }
                     else
                     {

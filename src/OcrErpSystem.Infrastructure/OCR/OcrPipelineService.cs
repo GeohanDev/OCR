@@ -15,6 +15,7 @@ public class OcrPipelineService : IOcrService
 {
     private readonly IImagePreprocessor _preprocessor;
     private readonly ITesseractOcrEngine _engine;
+    private readonly IClaudeOcrEngine _claude;
     private readonly IFieldExtractor _extractor;
     private readonly IFieldNormalizer _normalizer;
     private readonly IConfidenceScorer _scorer;
@@ -22,11 +23,13 @@ public class OcrPipelineService : IOcrService
     private readonly IFieldMappingService _fieldMapping;
     private readonly DocumentRepository _docRepo;
     private readonly OcrResultRepository _ocrRepo;
+    private readonly ValidationRepository _validationRepo;
     private readonly ILogger<OcrPipelineService> _logger;
 
     public OcrPipelineService(
         IImagePreprocessor preprocessor,
         ITesseractOcrEngine engine,
+        IClaudeOcrEngine claude,
         IFieldExtractor extractor,
         IFieldNormalizer normalizer,
         IConfidenceScorer scorer,
@@ -34,10 +37,12 @@ public class OcrPipelineService : IOcrService
         IFieldMappingService fieldMapping,
         DocumentRepository docRepo,
         OcrResultRepository ocrRepo,
+        ValidationRepository validationRepo,
         ILogger<OcrPipelineService> logger)
     {
         _preprocessor = preprocessor;
         _engine = engine;
+        _claude = claude;
         _extractor = extractor;
         _normalizer = normalizer;
         _scorer = scorer;
@@ -45,6 +50,7 @@ public class OcrPipelineService : IOcrService
         _fieldMapping = fieldMapping;
         _docRepo = docRepo;
         _ocrRepo = ocrRepo;
+        _validationRepo = validationRepo;
         _logger = logger;
     }
 
@@ -77,40 +83,76 @@ public class OcrPipelineService : IOcrService
         try
         {
             await using var fileStream = await _storage.ReadAsync(doc.StoragePath, ct);
-            // Resolve MIME type from storage extension when the stored value is missing or generic.
             var mimeType = ResolveMimeType(doc.MimeType, doc.StoragePath);
-            var pages = await _preprocessor.PreprocessAsync(fileStream, mimeType, ct);
-            var ocrOutput = await _engine.RecognizeAsync(pages, ct);
 
             IReadOnlyList<FieldMappingConfigDto> fieldConfigs = [];
             if (doc.DocumentTypeId.HasValue)
                 fieldConfigs = await _fieldMapping.GetActiveConfigAsync(doc.DocumentTypeId.Value, ct);
 
-            var rawFields = _extractor.ExtractFields(ocrOutput, fieldConfigs);
+            // ── Route to Claude or Tesseract based on configuration ───────────
+            IReadOnlyList<ProcessedPageImage> pages;
+            IReadOnlyList<RawExtractedField> rawFields;
+            IReadOnlyList<OcrBlock> ocrBlocks = [];   // only populated on Tesseract path
+            string rawText;
+            string engineVersion;
+            double fallbackConf;   // used when no fields were extracted
 
-            var extractedFields = new List<ExtractedField>();
-            var fieldDtos = new List<ExtractedFieldDto>();
-            var lowConfFields = new List<string>();
-
-            foreach (var raw in rawFields)
+            if (_claude.IsConfigured)
             {
-                var config = fieldConfigs.FirstOrDefault(c => c.Id == raw.FieldMappingConfigId);
-                var normalized = _normalizer.Normalize(raw.RawValue, config?.ErpMappingKey);
-                var confidence = _scorer.Score(raw, ocrOutput.Blocks);
-                var threshold = config?.ConfidenceThreshold ?? 0.75;
+                pages = await _preprocessor.PreprocessForClaudeAsync(fileStream, mimeType, ct);
+                var claudeResult = await _claude.ExtractAsync(pages, fieldConfigs, ct);
+                rawText       = claudeResult.FullText;
+                rawFields     = claudeResult.Fields;
+                engineVersion = $"Claude/{claudeResult.ModelUsed}";
+                fallbackConf  = claudeResult.OverallConfidence;
+            }
+            else
+            {
+                pages = await _preprocessor.PreprocessAsync(fileStream, mimeType, ct);
+                var ocrOutput = await _engine.RecognizeAsync(pages, ct);
+                rawText       = ocrOutput.FullText;
+                rawFields     = _extractor.ExtractFields(ocrOutput, fieldConfigs);
+                ocrBlocks     = ocrOutput.Blocks;
+                engineVersion = ocrOutput.EngineVersion;
+                fallbackConf  = ocrOutput.OverallConfidence;
+            }
 
-                if (confidence < threshold)
-                    lowConfFields.Add(raw.FieldName);
+            // ── Field processing (common to both paths) ───────────────────────
+            var extractedFields = new List<ExtractedField>();
+            var fieldDtos       = new List<ExtractedFieldDto>();
+            var lowConfFields   = new List<string>();
+
+            for (int i = 0; i < rawFields.Count; i++)
+            {
+                var raw = rawFields[i];
+                var config    = fieldConfigs.FirstOrDefault(c => c.Id == raw.FieldMappingConfigId);
+                var normalized = _normalizer.Normalize(raw.RawValue, config?.ErpMappingKey);
+
+                // Claude supplies per-field confidence directly; Tesseract uses the scorer formula.
+                var confidence = _claude.IsConfigured
+                    ? (double)raw.StrategyConfidence
+                    : _scorer.Score(raw, ocrBlocks);
+
+                // Only flag low-confidence for mapped fields (unconfigured extras have no threshold).
+                if (config is not null)
+                {
+                    var threshold = (double)config.ConfidenceThreshold;
+                    if (confidence < threshold)
+                        lowConfFields.Add(raw.FieldName);
+                }
 
                 var field = new ExtractedField
                 {
-                    FieldName = raw.FieldName,
+                    SortOrder            = i,
+                    FieldName            = raw.FieldName,
                     FieldMappingConfigId = raw.FieldMappingConfigId,
-                    RawValue = raw.RawValue,
-                    NormalizedValue = normalized,
-                    Confidence = (decimal)confidence,
-                    BoundingBox = raw.BoundingBox is not null
-                        ? JsonSerializer.Serialize(new { page = raw.Page, x = raw.BoundingBox.X, y = raw.BoundingBox.Y, w = raw.BoundingBox.Width, h = raw.BoundingBox.Height })
+                    RawValue             = raw.RawValue,
+                    NormalizedValue      = normalized,
+                    Confidence           = (decimal)confidence,
+                    BoundingBox          = raw.BoundingBox is not null
+                        ? JsonSerializer.Serialize(new
+                            { page = raw.Page, x = raw.BoundingBox.X, y = raw.BoundingBox.Y,
+                              w = raw.BoundingBox.Width, h = raw.BoundingBox.Height })
                         : null
                 };
                 extractedFields.Add(field);
@@ -119,36 +161,41 @@ public class OcrPipelineService : IOcrService
                     field.Id, field.FieldName, field.RawValue, field.NormalizedValue,
                     (double)field.Confidence,
                     raw.BoundingBox is not null
-                        ? new BoundingBoxDto(raw.Page ?? 1, raw.BoundingBox.X, raw.BoundingBox.Y, raw.BoundingBox.Width, raw.BoundingBox.Height)
+                        ? new BoundingBoxDto(raw.Page ?? 1, raw.BoundingBox.X, raw.BoundingBox.Y,
+                                             raw.BoundingBox.Width, raw.BoundingBox.Height)
                         : null,
                     false, null));
             }
 
             sw.Stop();
-            var overallConf = extractedFields.Count > 0 ? (double)extractedFields.Average(f => f.Confidence ?? 0) : 0;
+            var overallConf = extractedFields.Count > 0
+                ? (double)extractedFields.Average(f => f.Confidence ?? 0)
+                : fallbackConf;
 
             var ocrResult = new OcrResult
             {
-                DocumentId = documentId,
-                VersionNumber = doc.CurrentVersion,
-                RawText = ocrOutput.FullText,
-                EngineVersion = ocrOutput.EngineVersion,
-                ProcessingMs = (int)sw.ElapsedMilliseconds,
+                DocumentId        = documentId,
+                VersionNumber     = doc.CurrentVersion,
+                RawText           = rawText,
+                EngineVersion     = engineVersion,
+                ProcessingMs      = (int)sw.ElapsedMilliseconds,
                 OverallConfidence = (decimal)overallConf,
-                PageCount = pages.Count,
-                CreatedAt = DateTimeOffset.UtcNow,
-                ExtractedFields = extractedFields
+                PageCount         = pages.Count,
+                CreatedAt         = DateTimeOffset.UtcNow,
+                ExtractedFields   = extractedFields
             };
             await _ocrRepo.AddResultAsync(ocrResult, ct);
 
-            doc.Status = DocumentStatus.PendingReview;
+            doc.Status      = DocumentStatus.PendingReview;
             doc.ProcessedAt = DateTimeOffset.UtcNow;
             await _docRepo.UpdateAsync(doc, ct);
 
-            _logger.LogInformation("OCR complete for {Id}: {F} fields, conf={C:F2}, {L} low-conf",
-                documentId, fieldDtos.Count, overallConf, lowConfFields.Count);
+            _logger.LogInformation(
+                "OCR complete for {Id} via {E}: {F} fields, conf={C:F2}, {L} low-conf",
+                documentId, engineVersion, fieldDtos.Count, overallConf, lowConfFields.Count);
 
-            return new OcrPipelineResult(ocrResult.Id, pages.Count, overallConf, fieldDtos, lowConfFields, lowConfFields.Count > 0);
+            return new OcrPipelineResult(
+                ocrResult.Id, pages.Count, overallConf, fieldDtos, lowConfFields, lowConfFields.Count > 0);
         }
         catch (Exception ex)
         {
@@ -171,8 +218,28 @@ public class OcrPipelineService : IOcrService
             result.ExtractedFields.Select(f => new ExtractedFieldDto(
                 f.Id, f.FieldName, f.RawValue, f.NormalizedValue,
                 f.Confidence.HasValue ? (double)f.Confidence.Value : null,
-                null, f.IsManuallyCorreected, f.CorrectedValue)).ToList(),
+                DeserializeBoundingBox(f.BoundingBox),
+                f.IsManuallyCorreected, f.CorrectedValue)).ToList(),
             result.CreatedAt);
+    }
+
+    private static BoundingBoxDto? DeserializeBoundingBox(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            var doc = JsonSerializer.Deserialize<JsonElement>(json);
+            return new BoundingBoxDto(
+                doc.GetProperty("page").GetInt32(),
+                doc.GetProperty("x").GetInt32(),
+                doc.GetProperty("y").GetInt32(),
+                doc.GetProperty("w").GetInt32(),
+                doc.GetProperty("h").GetInt32());
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public async Task<ExtractedFieldDto> CorrectFieldAsync(Guid extractedFieldId, string correctedValue, Guid correctedBy, CancellationToken ct = default)
@@ -194,5 +261,12 @@ public class OcrPipelineService : IOcrService
     {
         var result = await _ocrRepo.GetByDocumentIdAsync(documentId, ct);
         return result?.RawText;
+    }
+
+    public async Task DeleteFieldAsync(Guid extractedFieldId, CancellationToken ct = default)
+    {
+        // Delete validation results first so counts are accurate on next server fetch.
+        await _validationRepo.DeleteByExtractedFieldIdAsync(extractedFieldId, ct);
+        await _ocrRepo.DeleteFieldAsync(extractedFieldId, ct);
     }
 }

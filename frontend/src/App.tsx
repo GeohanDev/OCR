@@ -14,6 +14,7 @@ import VerificationPage from './pages/VerificationPage';
 import UserManagementPage from './pages/admin/UserManagementPage';
 import FieldMappingConfigPage from './pages/admin/FieldMappingConfigPage';
 import AuditLogPage from './pages/admin/AuditLogPage';
+import AcumaticaTestPage from './pages/admin/AcumaticaTestPage';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -51,6 +52,7 @@ export default function App() {
                 </Route>
                 <Route element={<ProtectedRoute requireAdmin />}>
                   <Route path="/admin/config" element={<FieldMappingConfigPage />} />
+                  <Route path="/admin/erp-test" element={<AcumaticaTestPage />} />
                 </Route>
               </Route>
             </Route>

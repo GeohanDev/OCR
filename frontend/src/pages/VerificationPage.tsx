@@ -1,30 +1,58 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import { documentApi, ocrApi } from '../api/client';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { documentApi, ocrApi, configApi } from '../api/client';
 import FieldReviewPanel from '../components/FieldReviewPanel';
 import StatusBadge from '../components/ui/StatusBadge';
-import type { Document, OcrResult, ExtractedField } from '../types';
-import { ChevronLeft, ZoomIn, ZoomOut, Loader2 } from 'lucide-react';
+import type { Document, OcrResult, ExtractedField, FieldMappingConfig } from '../types';
+import { ChevronLeft, ZoomIn, ZoomOut, Loader2, Eye, CheckSquare } from 'lucide-react';
 import { Document as PdfDocument, Page as PdfPage, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 
-pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url,
-).toString();
+// Use a static path (copied to public/ in Docker build) to avoid .mjs MIME-type issues with nginx.
+pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.js';
 
 export default function VerificationPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const [selectedField, setSelectedField] = useState<ExtractedField | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.0);
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfViewerWidth, setPdfViewerWidth] = useState(0);
   const canvasRef = useRef<HTMLDivElement>(null);
+
+  // Force the AppShell <main> to be a bounded, non-scrolling container so the
+  // VerificationPage top bar stays pinned and only the inner panels scroll.
+  useEffect(() => {
+    const main = document.querySelector<HTMLElement>('main');
+    const wrapper = main?.parentElement;
+    if (!main || !wrapper) return;
+    const prevMainOverflow = main.style.overflow;
+    const prevWrapperMinH  = wrapper.style.minHeight;
+    const prevWrapperH     = wrapper.style.height;
+    main.style.overflow    = 'hidden';
+    wrapper.style.minHeight = '';
+    wrapper.style.height   = '100vh';
+    return () => {
+      main.style.overflow    = prevMainOverflow;
+      wrapper.style.minHeight = prevWrapperMinH;
+      wrapper.style.height   = prevWrapperH;
+    };
+  }, []);
+
+  // Track viewer container width so the PDF page auto-fits without overflow
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setPdfViewerWidth(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const { data: doc } = useQuery<Document>({
     queryKey: ['document', id],
@@ -38,27 +66,48 @@ export default function VerificationPage() {
     enabled: !!id,
   });
 
-  // Load signed URL for PDF
-  useQuery({
+  // Load signed URL for PDF — use query data directly so cached value works on remount
+  const { data: pdfUrl } = useQuery<string>({
     queryKey: ['document-url', id],
-    queryFn: async () => {
-      const res = await documentApi.getSignedUrl(id!);
-      setPdfUrl(res.data.url);
-      return res.data.url;
-    },
+    queryFn: () => documentApi.getSignedUrl(id!).then(r => r.data.url),
     enabled: !!id,
     staleTime: 5 * 60 * 1000,
   });
 
+  const { data: fieldConfigs } = useQuery<FieldMappingConfig[]>({
+    queryKey: ['field-mappings', doc?.documentTypeId],
+    queryFn: () => configApi.getFieldMappings(doc!.documentTypeId!).then(r => r.data),
+    enabled: !!doc?.documentTypeId,
+  });
+
+  const markChecked = useMutation({
+    mutationFn: () => documentApi.updateStatus(id!, 'Checked'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['document', id] });
+      queryClient.invalidateQueries({ queryKey: ['documents'] });
+    },
+  });
+
   const fields = ocrResult?.fields ?? [];
+  const rawText = ocrResult?.rawText;
   const isPdf = doc?.originalFilename.toLowerCase().endsWith('.pdf');
+  const canCheck = doc && !['Uploaded', 'Processing', 'Approved', 'Pushed', 'Checked'].includes(doc.status);
 
   const selectedBBox = selectedField?.boundingBox;
 
+  // Stable callbacks prevent react-pdf from reloading the document on re-renders.
+  const handlePdfLoadSuccess = useCallback(({ numPages }: { numPages: number }) => {
+    setNumPages(numPages);
+    setPdfError(null);
+  }, []);
+  const handlePdfLoadError = useCallback((err: Error) => {
+    setPdfError(err.message ?? 'Unknown error');
+  }, []);
+
   return (
-    <div className="flex flex-col h-full -m-4 md:-m-6">
-      {/* Top bar */}
-      <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-gray-200 flex-shrink-0">
+    <div className="flex flex-col h-full overflow-hidden -m-4 md:-m-6">
+      {/* Top bar — flex-shrink-0 keeps it pinned while panels scroll independently */}
+      <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-gray-200 flex-shrink-0 z-10">
         <div className="flex items-center gap-3">
           <button onClick={() => navigate(`/documents/${id}`)} className="text-gray-500 hover:text-gray-700">
             <ChevronLeft className="h-5 w-5" />
@@ -68,12 +117,39 @@ export default function VerificationPage() {
             {doc && <StatusBadge status={doc.status} />}
           </div>
         </div>
+        <div className="flex items-center gap-2">
+          {canCheck && (
+            <button
+              onClick={() => markChecked.mutate()}
+              disabled={markChecked.isPending}
+              className="flex items-center gap-1.5 text-sm text-white bg-teal-600 hover:bg-teal-700 disabled:opacity-50 border border-teal-600 rounded-md px-3 py-1.5 transition-colors font-medium"
+            >
+              {markChecked.isPending
+                ? <Loader2 className="h-4 w-4 animate-spin" />
+                : <CheckSquare className="h-4 w-4" />}
+              Mark as Checked
+            </button>
+          )}
+          {doc?.status === 'Checked' && (
+            <span className="text-sm text-teal-700 font-medium flex items-center gap-1">
+              <CheckSquare className="h-4 w-4" /> Checked
+            </span>
+          )}
+          {pdfUrl && (
+            <button
+              onClick={() => window.open(pdfUrl, '_blank')}
+              className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 border border-gray-200 rounded-md px-3 py-1.5 hover:bg-gray-50 transition-colors"
+            >
+              <Eye className="h-4 w-4" /> Open File
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Split pane */}
-      <div className="flex flex-col md:flex-row flex-1 overflow-hidden">
+      {/* Split pane — flex-1 min-h-0 so it fills remaining space and overflows internally */}
+      <div className="flex flex-col md:flex-row flex-1 min-h-0 overflow-hidden">
         {/* Left: Document viewer */}
-        <div className="flex flex-col flex-1 overflow-hidden border-b md:border-b-0 md:border-r border-gray-200 bg-gray-100 min-h-0 md:min-h-full">
+        <div className="flex flex-col flex-1 min-h-0 overflow-hidden border-b md:border-b-0 md:border-r border-gray-200 bg-gray-100">
           {/* Viewer toolbar */}
           <div className="flex items-center justify-between px-3 py-2 bg-white border-b border-gray-200 flex-shrink-0">
             <div className="flex items-center gap-2">
@@ -100,22 +176,31 @@ export default function VerificationPage() {
             </div>
           </div>
 
-          {/* PDF / image viewer */}
-          <div className="flex-1 overflow-auto flex justify-center p-4" ref={canvasRef}>
+          {/* PDF / image viewer — auto-fits to container width, scrolls when zoomed */}
+          <div className="flex-1 overflow-auto p-4" ref={canvasRef}>
             {!pdfUrl ? (
-              <div className="flex items-center justify-center text-gray-400">
+              <div className="flex items-center justify-center h-full text-gray-400">
                 <Loader2 className="h-6 w-6 animate-spin" />
               </div>
+            ) : pdfError ? (
+              <div className="flex flex-col items-center justify-center gap-3 text-red-500 p-6 text-center h-full">
+                <p className="text-sm font-medium">Failed to load document</p>
+                <p className="text-xs text-gray-500">{pdfError}</p>
+                <a href={pdfUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 underline">
+                  Open file directly
+                </a>
+              </div>
             ) : isPdf ? (
-              <div className="relative">
+              <div className="relative inline-block">
                 <PdfDocument
                   file={pdfUrl}
-                  onLoadSuccess={({ numPages }) => setNumPages(numPages)}
+                  onLoadSuccess={handlePdfLoadSuccess}
+                  onLoadError={handlePdfLoadError}
                   loading={<Loader2 className="h-6 w-6 animate-spin text-gray-400" />}
                 >
                   <PdfPage
                     pageNumber={currentPage}
-                    scale={scale}
+                    width={pdfViewerWidth > 0 ? Math.max(100, pdfViewerWidth - 32) * scale : undefined}
                     renderAnnotationLayer={true}
                     renderTextLayer={true}
                   />
@@ -138,23 +223,25 @@ export default function VerificationPage() {
               <img
                 src={pdfUrl}
                 alt="Document"
-                style={{ transform: `scale(${scale})`, transformOrigin: 'top center' }}
-                className="max-w-full shadow-lg"
+                style={{ maxWidth: '100%', transform: `scale(${scale})`, transformOrigin: 'top left' }}
+                className="shadow-lg"
               />
             )}
           </div>
         </div>
 
-        {/* Right: Field review panel */}
-        <div className="w-full md:w-96 flex flex-col overflow-hidden bg-white">
+        {/* Right: Field review panel — wider to show table columns, fully scrollable */}
+        <div className="w-full md:w-[580px] flex flex-col min-h-0 overflow-hidden bg-white flex-shrink-0">
           <div className="px-4 py-3 border-b border-gray-200 flex-shrink-0">
             <h2 className="text-sm font-semibold text-gray-700">Extracted Fields</h2>
             <p className="text-xs text-gray-500">{fields.length} fields · click to highlight on document</p>
           </div>
-          <div className="flex-1 overflow-hidden">
+          <div className="flex-1 overflow-auto">
             <FieldReviewPanel
               documentId={id!}
               fields={fields}
+              rawText={rawText}
+              fieldConfigs={fieldConfigs}
               onFieldSelect={f => { setSelectedField(f); if (f?.boundingBox) setCurrentPage(f.boundingBox.page); }}
               selectedFieldId={selectedField?.id}
             />

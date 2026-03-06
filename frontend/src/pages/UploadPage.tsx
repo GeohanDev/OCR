@@ -1,10 +1,10 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { documentApi, configApi } from '../api/client';
+import { documentApi, configApi, ocrApi, validationApi } from '../api/client';
 import type { DocumentType } from '../types';
-import { Upload, X, CheckCircle, AlertCircle, FileText, Loader2 } from 'lucide-react';
+import { Upload, X, CheckCircle, AlertCircle, FileText, Loader2, ScanLine } from 'lucide-react';
 
 type FileStatus = 'pending' | 'uploading' | 'done' | 'error';
 
@@ -23,6 +23,9 @@ export default function UploadPage() {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [selectedType, setSelectedType] = useState('');
   const [isUploading, setIsUploading] = useState(false);
+  const [showOcrPrompt, setShowOcrPrompt] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [processingError, setProcessingError] = useState<string | null>(null);
 
   const { data: docTypes } = useQuery<DocumentType[]>({
     queryKey: ['document-types'],
@@ -148,8 +151,47 @@ export default function UploadPage() {
     queryClient.invalidateQueries({ queryKey: ['documents'] });
   };
 
-  const allDone = files.length > 0 && files.every(f => f.status === 'done');
+  const allDone = files.length > 0 && files.every(f => f.status === 'done' || f.status === 'error')
+    && files.some(f => f.status === 'done');
   const hasPending = files.some(f => f.status === 'pending');
+  const selectedTypeLabel = selectedType
+    ? (docTypes?.find(dt => dt.id === selectedType)?.displayName ?? 'Unknown type')
+    : 'Auto-detect';
+
+  // After all uploads finish, show the OCR & validation prompt instead of auto-redirecting.
+  useEffect(() => {
+    if (allDone) setShowOcrPrompt(true);
+  }, [allDone]);
+
+  const handleStartOcrAndValidation = async () => {
+    const done = files.filter(f => f.status === 'done' && f.documentId);
+    setIsProcessing(true);
+    setProcessingError(null);
+    try {
+      if (done.length === 1) {
+        const docId = done[0].documentId!;
+        await ocrApi.process(docId);
+        await validationApi.run(docId);
+        navigate(`/documents/${docId}`);
+      } else {
+        // Multiple files: kick off OCR for each but navigate away to the list
+        await Promise.allSettled(done.map(d => ocrApi.process(d.documentId!)));
+        navigate('/documents');
+      }
+    } catch {
+      setProcessingError('OCR or validation failed. You can retry from the document page.');
+      setIsProcessing(false);
+    }
+  };
+
+  const handleSkipOcr = () => {
+    const done = files.filter(f => f.status === 'done');
+    if (done.length === 1 && done[0].documentId) {
+      navigate(`/documents/${done[0].documentId}`);
+    } else {
+      navigate('/documents');
+    }
+  };
 
   return (
     <div className="space-y-6 max-w-2xl mx-auto">
@@ -192,6 +234,65 @@ export default function UploadPage() {
               <button className="btn-secondary" onClick={handleDuplicateSkip}>Skip</button>
               <button className="btn-primary bg-yellow-600 hover:bg-yellow-700" onClick={handleDuplicateReplace}>
                 Replace
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Post-upload OCR & validation prompt */}
+      {showOcrPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+          <div className="card p-6 w-full max-w-md space-y-4">
+            <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+              <CheckCircle className="h-5 w-5 text-green-500" />
+              Upload Complete
+            </h3>
+
+            <div className="rounded-lg bg-gray-50 border border-gray-200 p-3 space-y-1 text-sm">
+              <p className="text-gray-600">
+                <span className="font-medium text-gray-800">
+                  {files.filter(f => f.status === 'done').length}
+                </span>{' '}
+                file(s) uploaded successfully.
+              </p>
+              <p className="text-gray-600">
+                Document type:{' '}
+                <span className="font-medium text-gray-900">{selectedTypeLabel}</span>
+              </p>
+            </div>
+
+            <div className="flex items-start gap-3 rounded-lg bg-blue-50 border border-blue-100 p-3">
+              <ScanLine className="h-5 w-5 text-blue-500 flex-shrink-0 mt-0.5" />
+              <p className="text-sm text-blue-800">
+                Would you like to start OCR extraction and field validation now?
+              </p>
+            </div>
+
+            {processingError && (
+              <p className="text-sm text-red-600 flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                {processingError}
+              </p>
+            )}
+
+            <div className="flex justify-end gap-3 pt-1">
+              <button
+                className="btn-secondary"
+                onClick={handleSkipOcr}
+                disabled={isProcessing}
+              >
+                Skip for Now
+              </button>
+              <button
+                className="btn-primary flex items-center gap-2"
+                onClick={handleStartOcrAndValidation}
+                disabled={isProcessing}
+              >
+                {isProcessing
+                  ? <><Loader2 className="h-4 w-4 animate-spin" /> Processing...</>
+                  : <><ScanLine className="h-4 w-4" /> Start OCR & Validation</>
+                }
               </button>
             </div>
           </div>

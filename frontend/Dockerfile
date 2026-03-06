@@ -6,7 +6,11 @@ COPY package*.json ./
 RUN npm ci
 
 COPY . .
-ARG VITE_API_URL=/api
+# Copy PDF.js worker into public so it is served as a plain .js file (avoids nginx .mjs MIME-type issues)
+RUN cp node_modules/pdfjs-dist/build/pdf.worker.min.mjs public/pdf.worker.min.js 2>/dev/null || \
+    cp node_modules/pdfjs-dist/build/pdf.worker.min.js public/pdf.worker.min.js 2>/dev/null || \
+    echo "WARNING: pdfjs worker not found"
+ARG VITE_API_URL=
 ARG VITE_ACUMATICA_URL
 ARG VITE_ACUMATICA_CLIENT_ID
 ENV VITE_API_URL=$VITE_API_URL

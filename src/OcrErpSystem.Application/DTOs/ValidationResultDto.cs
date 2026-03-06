@@ -9,4 +9,5 @@ public record ValidationResultDto(
     string Status,
     string? Message,
     object? ErpReference,
+    string? ErpResponseField,
     DateTimeOffset ValidatedAt);

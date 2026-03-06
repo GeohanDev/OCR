@@ -16,6 +16,6 @@ public class RequiredFieldValidator : IFieldValidator
         var value = field.CorrectedValue ?? field.NormalizedValue ?? field.RawValue;
         return Task.FromResult(string.IsNullOrWhiteSpace(value)
             ? new FieldValidationResult("Failed", $"Required field '{field.FieldName}' is missing or empty.", "Required")
-            : new FieldValidationResult("Passed", null, "Required"));
+            : new FieldValidationResult("Skipped", null, "Required"));
     }
 }

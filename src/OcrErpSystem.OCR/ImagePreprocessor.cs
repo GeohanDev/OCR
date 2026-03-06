@@ -6,6 +6,10 @@ namespace OcrErpSystem.OCR;
 public interface IImagePreprocessor
 {
     Task<IReadOnlyList<ProcessedPageImage>> PreprocessAsync(Stream fileStream, string mimeType, CancellationToken ct = default);
+
+    // Claude-optimised preprocessing: no hard threshold, images resized to ≤ 1568 px.
+    // For digital PDFs the pre-extracted text blocks are populated and no image is rendered.
+    Task<IReadOnlyList<ProcessedPageImage>> PreprocessForClaudeAsync(Stream fileStream, string mimeType, CancellationToken ct = default);
 }
 
 // PreExtractedBlocks is populated for text-based PDFs so TesseractOcrEngine
@@ -90,12 +94,29 @@ public class ImagePreprocessor : IImagePreprocessor
                         .OrderByDescending(img => img.WidthInSamples * img.HeightInSamples)
                         .First();
 
+                    // Primary: PNG conversion (works for most embedded image formats).
                     if (largest.TryGetPng(out var pngBytes))
                     {
                         using var imgStream = new MemoryStream(pngBytes);
                         var preprocessed = await ProcessImageAsync(imgStream, pageNum++);
                         pages.Add(preprocessed);
                         continue;
+                    }
+
+                    // Fallback: try decoding the raw image bytes directly (e.g., JPEG images
+                    // embedded in PDFs that PdfPig cannot convert to PNG).
+                    var rawBytes = largest.RawBytes.ToArray();
+                    if (rawBytes.Length > 0)
+                    {
+                        using var rawStream = new MemoryStream(rawBytes);
+                        using var decoded = SKBitmap.Decode(rawStream);
+                        if (decoded is not null)
+                        {
+                            rawStream.Seek(0, SeekOrigin.Begin);
+                            var preprocessed = await ProcessImageAsync(rawStream, pageNum++);
+                            pages.Add(preprocessed);
+                            continue;
+                        }
                     }
                 }
             }
@@ -169,5 +190,132 @@ public class ImagePreprocessor : IImagePreprocessor
                 result.SetPixel(x, y, gray < threshold ? SKColors.Black : SKColors.White);
             }
         return result;
+    }
+
+    // ── Claude-optimised preprocessing ────────────────────────────────────────
+
+    public async Task<IReadOnlyList<ProcessedPageImage>> PreprocessForClaudeAsync(
+        Stream fileStream, string mimeType, CancellationToken ct = default)
+    {
+        fileStream.Seek(0, SeekOrigin.Begin);
+        var isPdf = mimeType.Contains("pdf", StringComparison.OrdinalIgnoreCase)
+                    || await IsPdfAsync(fileStream, ct);
+        fileStream.Seek(0, SeekOrigin.Begin);
+
+        if (isPdf)
+            return await ProcessPdfForClaudeAsync(fileStream, ct);
+
+        return [await ProcessImageForClaudeAsync(fileStream, 1)];
+    }
+
+    // Same PdfPig text extraction as ProcessPdfAsync.
+    // Digital pages get an empty image (Claude uses the pre-extracted text).
+    // Scanned pages get Claude-optimised images (resized, no threshold).
+    private static async Task<IReadOnlyList<ProcessedPageImage>> ProcessPdfForClaudeAsync(
+        Stream pdfStream, CancellationToken ct)
+    {
+        var pages = new List<ProcessedPageImage>();
+        using var doc = PdfDocument.Open(pdfStream);
+        int pageNum = 1;
+
+        foreach (var page in doc.GetPages())
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var widthPx  = Math.Max((int)(page.Width  / 72.0 * TargetDpi), 100);
+            var heightPx = Math.Max((int)(page.Height / 72.0 * TargetDpi), 100);
+
+            // Extract embedded text (text-based PDFs)
+            var directBlocks = new List<OcrBlock>();
+            foreach (var word in page.GetWords())
+            {
+                if (string.IsNullOrWhiteSpace(word.Text)) continue;
+                var x = (int)(word.BoundingBox.Left   / page.Width  * widthPx);
+                var y = (int)((1.0 - word.BoundingBox.Top / page.Height) * heightPx);
+                var w = Math.Max((int)(word.BoundingBox.Width  / page.Width  * widthPx), 1);
+                var h = Math.Max((int)(word.BoundingBox.Height / page.Height * heightPx), 1);
+                directBlocks.Add(new OcrBlock(
+                    pageNum, word.Text.Trim(), 0.92f, new OcrBoundingBox(x, y, w, h), OcrBlockType.Word));
+            }
+
+            if (directBlocks.Count == 0)
+            {
+                // Scanned page — extract embedded raster image and preprocess for Claude
+                var embeddedImages = page.GetImages().ToList();
+                if (embeddedImages.Count > 0)
+                {
+                    var largest = embeddedImages
+                        .OrderByDescending(img => img.WidthInSamples * img.HeightInSamples)
+                        .First();
+
+                    if (largest.TryGetPng(out var pngBytes))
+                    {
+                        using var imgStream = new MemoryStream(pngBytes);
+                        pages.Add(await ProcessImageForClaudeAsync(imgStream, pageNum++));
+                        continue;
+                    }
+
+                    var rawBytes = largest.RawBytes.ToArray();
+                    if (rawBytes.Length > 0)
+                    {
+                        using var rawStream = new MemoryStream(rawBytes);
+                        using var decoded = SKBitmap.Decode(rawStream);
+                        if (decoded is not null)
+                        {
+                            rawStream.Seek(0, SeekOrigin.Begin);
+                            pages.Add(await ProcessImageForClaudeAsync(rawStream, pageNum++));
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Digital page — store pre-extracted text; Claude does not need the image.
+            pages.Add(new ProcessedPageImage(
+                pageNum++, [], widthPx, heightPx, TargetDpi,
+                directBlocks.Count > 0 ? directBlocks : null));
+        }
+
+        return pages;
+    }
+
+    // Resize to Claude's recommended max (1568 px on the longest side),
+    // convert to grayscale — no hard threshold so Claude's vision handles contrast.
+    private static Task<ProcessedPageImage> ProcessImageForClaudeAsync(Stream imageStream, int pageNumber)
+    {
+        using var original = SKBitmap.Decode(imageStream);
+        if (original is null)
+            throw new InvalidOperationException("Could not decode image");
+
+        const int MaxDimension = 1568;
+        int width  = original.Width;
+        int height = original.Height;
+
+        if (width > MaxDimension || height > MaxDimension)
+        {
+            var scale = Math.Min((double)MaxDimension / width, (double)MaxDimension / height);
+            width  = (int)(width  * scale);
+            height = (int)(height * scale);
+        }
+
+        using var grayscale = new SKBitmap(width, height, SKColorType.Gray8, SKAlphaType.Opaque);
+        using (var canvas = new SKCanvas(grayscale))
+        {
+            using var paint = new SKPaint
+            {
+                ColorFilter = SKColorFilter.CreateColorMatrix(new float[]
+                {
+                    0.299f, 0.587f, 0.114f, 0, 0,
+                    0.299f, 0.587f, 0.114f, 0, 0,
+                    0.299f, 0.587f, 0.114f, 0, 0,
+                    0,      0,      0,      1, 0
+                })
+            };
+            canvas.DrawBitmap(original, new SKRect(0, 0, width, height), paint);
+        }
+
+        using var image = SKImage.FromBitmap(grayscale);
+        var imageData = image.Encode(SKEncodedImageFormat.Png, 90).ToArray();
+        return Task.FromResult(new ProcessedPageImage(pageNumber, imageData, width, height, 96));
     }
 }

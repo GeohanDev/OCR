@@ -3,9 +3,8 @@ namespace OcrErpSystem.Application.DTOs;
 public record DashboardKpisDto(
     int TotalDocuments,
     int PendingReview,
-    int Approved,
     int Failed,
-    int PushedToErp,
+    int Checked,
     IReadOnlyList<RecentDocumentDto> RecentDocuments);
 
 public record RecentDocumentDto(
