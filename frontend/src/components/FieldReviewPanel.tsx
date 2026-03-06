@@ -142,7 +142,11 @@ export default function FieldReviewPanel({
   // All field IDs — used to fire individual validations in parallel when Run Validation is clicked.
   const allFieldIds = useMemo(() => fields.map(f => f.id), [fields]);
   const runAllValidations = useCallback(() => {
-    setSessionError(null);
+    if (!sessionStorage.getItem('acumatica_token')) {
+      setSessionError('No active Acumatica session — ERP validators will use the service account. Sign out and sign in again for user-level validation.');
+    } else {
+      setSessionError(null);
+    }
     allFieldIds.forEach(id => validateField.mutate(id));
   }, [allFieldIds, validateField]);
   const isValidating = allFieldIds.some(id => pendingIds.has(id));

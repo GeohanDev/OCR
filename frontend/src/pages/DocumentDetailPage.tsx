@@ -296,7 +296,11 @@ export default function DocumentDetailPage() {
   [ocrResult?.fields]);
 
   const runAllValidations = useCallback(() => {
-    setSessionError(null);
+    if (!sessionStorage.getItem('acumatica_token')) {
+      setSessionError('No active Acumatica session — ERP validators will use the service account. Sign out and sign in again for user-level validation.');
+    } else {
+      setSessionError(null);
+    }
     allFieldIds.forEach(fid => validateField.mutate(fid));
   }, [allFieldIds, validateField]);
 
