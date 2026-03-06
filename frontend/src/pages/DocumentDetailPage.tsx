@@ -159,7 +159,7 @@ export default function DocumentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { isAdmin } = useAuth();
+  const { isAdmin, logout } = useAuth();
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [editingType, setEditingType] = useState(false);
   const [pendingTypeId, setPendingTypeId] = useState<string>('');
@@ -236,10 +236,7 @@ export default function DocumentDetailPage() {
     },
     onError: (error: unknown) => {
       const status = (error as { response?: { status?: number } })?.response?.status;
-      if (status === 424) {
-        const msg = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
-        setSessionError(msg ?? 'Acumatica session expired — please sign out and sign in again.');
-      }
+      if (status === 424) logout('session_expired');
     },
   });
 
@@ -270,10 +267,7 @@ export default function DocumentDetailPage() {
     },
     onError: (error: unknown) => {
       const status = (error as { response?: { status?: number } })?.response?.status;
-      if (status === 424) {
-        const msg = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
-        setSessionError(msg ?? 'Acumatica session expired — please sign out and sign in again.');
-      }
+      if (status === 424) logout('session_expired');
     },
   });
 
@@ -297,12 +291,12 @@ export default function DocumentDetailPage() {
 
   const runAllValidations = useCallback(() => {
     if (!sessionStorage.getItem('acumatica_token')) {
-      setSessionError('No active Acumatica session — ERP validators will use the service account. Sign out and sign in again for user-level validation.');
-    } else {
-      setSessionError(null);
+      logout('session_expired');
+      return;
     }
+    setSessionError(null);
     allFieldIds.forEach(fid => validateField.mutate(fid));
-  }, [allFieldIds, validateField]);
+  }, [allFieldIds, validateField, logout]);
 
   const isValidating = allFieldIds.some(id => pendingIds.has(id));
 

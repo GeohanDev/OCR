@@ -8,7 +8,7 @@ interface AuthContextValue {
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (token: string, acumaticaToken?: string) => Promise<void>;
-  logout: () => void;
+  logout: (reason?: string) => void;
   isManagerOrAbove: boolean;
   isAdmin: boolean;
 }
@@ -74,12 +74,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await fetchCurrentUser();
   };
 
-  const logout = () => {
+  const logout = (reason?: string) => {
     sessionStorage.removeItem('access_token');
     sessionStorage.removeItem('acumatica_token');
     localStorage.setItem(LOGGED_OUT_KEY, '1');
     setUser(null);
-    window.location.href = '/login';
+    window.location.href = reason ? `/login?error=${reason}` : '/login';
   };
 
   return (

@@ -18,6 +18,7 @@ export default function LoginPage() {
     token_exchange_failed: 'Could not exchange the authorisation code — check that Acumatica is configured correctly.',
     empty_token_response: 'Acumatica returned an empty token. Check your OAuth client configuration.',
     no_jwt_in_token_response: 'Acumatica did not return a JWT. Ensure the Connected Application has the openid scope enabled.',
+    session_expired: 'Your Acumatica session has expired. Please sign in again.',
   };
 
   useEffect(() => {

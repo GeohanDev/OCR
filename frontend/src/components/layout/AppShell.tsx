@@ -88,7 +88,7 @@ export default function AppShell() {
           </div>
         </div>
         <button
-          onClick={logout}
+          onClick={() => logout()}
           className="flex items-center gap-3 px-3 py-2 rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground w-full transition-colors"
         >
           <LogOut className="h-5 w-5" />

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ocrApi, validationApi } from '../api/client';
+import { useAuth } from '../contexts/AuthContext';
 // validationApi.run is intentionally unused here — Run Validation fires per-field mutations instead.
 import type { ExtractedField, ValidationResult, FieldMappingConfig } from '../types';
 import { CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Pencil, Trash2, RefreshCw, Loader2 } from 'lucide-react';
@@ -98,6 +99,7 @@ export default function FieldReviewPanel({
   selectedFieldId,
 }: FieldReviewPanelProps) {
   const queryClient = useQueryClient();
+  const { logout } = useAuth();
   const [showSummary, setShowSummary] = useState(true);
   const [sessionError, setSessionError] = useState<string | null>(null);
   // Tracks which field IDs are currently being validated (for spinner/pending UI).
@@ -132,10 +134,7 @@ export default function FieldReviewPanel({
     },
     onError: (error: unknown) => {
       const status = (error as { response?: { status?: number } })?.response?.status;
-      if (status === 424) {
-        const msg = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
-        setSessionError(msg ?? 'Acumatica session expired — please sign out and sign in again.');
-      }
+      if (status === 424) logout('session_expired');
     },
   });
 
@@ -143,12 +142,12 @@ export default function FieldReviewPanel({
   const allFieldIds = useMemo(() => fields.map(f => f.id), [fields]);
   const runAllValidations = useCallback(() => {
     if (!sessionStorage.getItem('acumatica_token')) {
-      setSessionError('No active Acumatica session — ERP validators will use the service account. Sign out and sign in again for user-level validation.');
-    } else {
-      setSessionError(null);
+      logout('session_expired');
+      return;
     }
+    setSessionError(null);
     allFieldIds.forEach(id => validateField.mutate(id));
-  }, [allFieldIds, validateField]);
+  }, [allFieldIds, validateField, logout]);
   const isValidating = allFieldIds.some(id => pendingIds.has(id));
 
   const correctField = useMutation({
