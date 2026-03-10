@@ -13,9 +13,14 @@ public class FieldMappingConfig
     public bool AllowMultiple { get; set; } = false;
     public string? ErpMappingKey { get; set; }
     public string? ErpResponseField { get; set; }  // JSON key in ERP response to show on pass (e.g. "vendorId", "RefNbr")
+    public string? DependentFieldKey { get; set; } // FieldName this field's ERP check must cross-validate against (e.g. "vendorName" for invoice cross-check)
     public decimal ConfidenceThreshold { get; set; } = 0.75m;
     public int DisplayOrder { get; set; } = 0;
+    public bool IsManualEntry { get; set; } = false;
+    public bool IsCheckbox { get; set; } = false;
     public bool IsActive { get; set; } = true;
+    public bool IsDeleted { get; set; } = false;
+    public DateTimeOffset? DeletedAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 

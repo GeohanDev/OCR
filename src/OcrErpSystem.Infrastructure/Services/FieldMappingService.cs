@@ -52,8 +52,11 @@ public class FieldMappingService : IFieldMappingService
             AllowMultiple = cmd.AllowMultiple,
             ErpMappingKey = cmd.ErpMappingKey,
             ErpResponseField = cmd.ErpResponseField,
+            DependentFieldKey = cmd.DependentFieldKey,
             ConfidenceThreshold = (decimal)cmd.ConfidenceThreshold,
             DisplayOrder = cmd.DisplayOrder,
+            IsManualEntry = cmd.IsManualEntry,
+            IsCheckbox = cmd.IsCheckbox,
             IsActive = true,
             CreatedAt = DateTimeOffset.UtcNow,
             UpdatedAt = DateTimeOffset.UtcNow
@@ -74,8 +77,11 @@ public class FieldMappingService : IFieldMappingService
         config.AllowMultiple = cmd.AllowMultiple;
         config.ErpMappingKey = cmd.ErpMappingKey;
         config.ErpResponseField = cmd.ErpResponseField;
+        config.DependentFieldKey = cmd.DependentFieldKey;
         config.ConfidenceThreshold = (decimal)cmd.ConfidenceThreshold;
         config.DisplayOrder = cmd.DisplayOrder;
+        config.IsManualEntry = cmd.IsManualEntry;
+        config.IsCheckbox = cmd.IsCheckbox;
         config.UpdatedAt = DateTimeOffset.UtcNow;
         await _repo.UpdateFieldMappingAsync(config, ct);
         return MapConfigDto(config);
@@ -83,6 +89,9 @@ public class FieldMappingService : IFieldMappingService
 
     public Task DeleteFieldMappingAsync(Guid fieldMappingId, CancellationToken ct = default) =>
         _repo.DeleteFieldMappingAsync(fieldMappingId, ct);
+
+    public Task DeleteDocumentTypeAsync(Guid documentTypeId, CancellationToken ct = default) =>
+        _repo.DeleteDocumentTypeAsync(documentTypeId, ct);
 
     public async Task ReorderFieldMappingsAsync(Guid documentTypeId, IReadOnlyList<Guid> orderedIds, CancellationToken ct = default)
     {
@@ -99,11 +108,33 @@ public class FieldMappingService : IFieldMappingService
         return configs.Select(MapConfigDto).ToList();
     }
 
+    public async Task<IReadOnlyList<TrashedFieldConfigDto>> GetTrashedFieldMappingsAsync(CancellationToken ct = default)
+    {
+        var configs = await _repo.GetTrashedFieldMappingsAsync(ct);
+        return configs.Select(c => new TrashedFieldConfigDto(
+            c.Id, c.DocumentTypeId, c.DocumentType?.DisplayName ?? c.DocumentTypeId.ToString(),
+            c.FieldName, c.DisplayLabel, c.DeletedAt ?? c.UpdatedAt)).ToList();
+    }
+
+    public Task RestoreFieldMappingAsync(Guid id, CancellationToken ct = default) =>
+        _repo.RestoreFieldMappingAsync(id, ct);
+
+    public async Task<IReadOnlyList<TrashedDocTypeDto>> GetTrashedDocTypesAsync(CancellationToken ct = default)
+    {
+        var types = await _repo.GetTrashedDocTypesAsync(ct);
+        return types.Select(t => new TrashedDocTypeDto(
+            t.Id, t.TypeKey, t.DisplayName, t.DeletedAt ?? t.CreatedAt, 0)).ToList();
+    }
+
+    public Task RestoreDocTypeAsync(Guid id, CancellationToken ct = default) =>
+        _repo.RestoreDocTypeAsync(id, ct);
+
     private static DocumentTypeDto MapTypeDto(DocumentType dt) =>
         new(dt.Id, dt.TypeKey, dt.DisplayName, dt.PluginClass, dt.IsActive, dt.CreatedAt);
 
     private static FieldMappingConfigDto MapConfigDto(FieldMappingConfig c) =>
         new(c.Id, c.DocumentTypeId, c.FieldName, c.DisplayLabel, c.RegexPattern,
             c.KeywordAnchor, c.PositionRule, c.IsRequired, c.AllowMultiple, c.ErpMappingKey,
-            c.ErpResponseField, (double)c.ConfidenceThreshold, c.DisplayOrder, c.IsActive, c.CreatedAt, c.UpdatedAt);
+            c.ErpResponseField, (double)c.ConfidenceThreshold, c.DisplayOrder, c.IsActive, c.CreatedAt, c.UpdatedAt,
+            c.DependentFieldKey, c.IsManualEntry, c.IsCheckbox);
 }

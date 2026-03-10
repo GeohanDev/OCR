@@ -133,8 +133,24 @@ public class DocumentService : IDocumentService
         var doc = await _repo.GetByIdAsync(id, ct);
         if (doc is null) return Result.Failure("Document not found.", ErrorCodes.NotFound);
         doc.IsDeleted = true;
+        doc.DeletedAt = DateTimeOffset.UtcNow;
         await _repo.UpdateAsync(doc, ct);
         return Result.Success();
+    }
+
+    public async Task<IReadOnlyList<TrashedDocumentDto>> GetTrashedAsync(Guid? requestingUserId, string requestingUserRole, CancellationToken ct = default)
+    {
+        var docs = await _repo.GetTrashedAsync(requestingUserId, requestingUserRole, ct);
+        return docs.Select(d => new TrashedDocumentDto(
+            d.Id, d.OriginalFilename, d.DocumentType?.DisplayName, d.Status.ToString(),
+            d.UploadedByUser?.Username ?? d.UploadedBy.ToString(),
+            d.UploadedAt, d.DeletedAt ?? d.UploadedAt)).ToList();
+    }
+
+    public async Task<Result> RestoreAsync(Guid id, CancellationToken ct = default)
+    {
+        var ok = await _repo.RestoreAsync(id, ct);
+        return ok ? Result.Success() : Result.Failure("Document not found in trash.", ErrorCodes.NotFound);
     }
 
     public async Task<Result<DocumentDto>> AddVersionAsync(Guid documentId, UploadDocumentCommand cmd, CancellationToken ct = default)
@@ -181,5 +197,6 @@ public class DocumentService : IDocumentService
         d.Status.ToString(), d.UploadedBy, d.UploadedByUser?.Username ?? "",
         d.BranchId, d.Branch?.BranchName,
         d.UploadedAt, d.ProcessedAt, d.ReviewedAt, d.ApprovedAt, d.PushedAt,
-        d.Notes, d.CurrentVersion);
+        d.Notes, d.CurrentVersion,
+        d.VendorId, d.VendorName);
 }

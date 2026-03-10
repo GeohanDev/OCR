@@ -18,4 +18,6 @@ public record DocumentDto(
     DateTimeOffset? ApprovedAt,
     DateTimeOffset? PushedAt,
     string? Notes,
-    int CurrentVersion);
+    int CurrentVersion,
+    Guid? VendorId = null,
+    string? VendorName = null);

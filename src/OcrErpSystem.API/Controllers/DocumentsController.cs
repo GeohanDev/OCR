@@ -53,13 +53,14 @@ public class DocumentsController : ControllerBase
         [FromQuery] string? search,
         [FromQuery] DateTimeOffset? from,
         [FromQuery] DateTimeOffset? to,
+        [FromQuery] Guid? vendorId,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         CancellationToken ct = default)
     {
         var query = new DocumentListQuery(
             _user.UserId, _user.Role, _user.BranchId,
-            status, search, from, to, page, pageSize);
+            status, search, from, to, page, pageSize, vendorId);
         var result = await _documents.ListAsync(query, ct);
         return Ok(result);
     }

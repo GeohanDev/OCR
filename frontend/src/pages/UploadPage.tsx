@@ -37,6 +37,7 @@ export default function UploadPage() {
   const [duplicates, setDuplicates] = useState<File[]>([]);
 
   const onDrop = useCallback((accepted: File[]) => {
+    if (!selectedType) return;
     setDropErrors([]);
     setFiles(prev => {
       const existingNames = new Set(prev.map(f => f.file.name));
@@ -197,20 +198,28 @@ export default function UploadPage() {
     <div className="space-y-6 max-w-2xl mx-auto">
       <h1 className="text-2xl font-bold text-gray-900">Upload Documents</h1>
 
-      {/* Document type selector */}
-      <div className="card p-4">
-        <label className="block text-sm font-medium text-gray-700 mb-2">Document Type (optional)</label>
+      {/* Document type selector — required before upload */}
+      <div className={`card p-4 ${!selectedType ? 'ring-2 ring-amber-400 ring-offset-1' : 'ring-2 ring-green-400 ring-offset-1'}`}>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Document Type <span className="text-red-500">*</span>
+        </label>
+        <p className="text-xs text-gray-500 mb-2">Select the document type before uploading.</p>
         <select
           className="input w-full"
           value={selectedType}
           onChange={e => setSelectedType(e.target.value)}
           disabled={isUploading}
         >
-          <option value="">Auto-detect</option>
+          <option value="">— Select document type —</option>
           {docTypes?.map(dt => (
             <option key={dt.id} value={dt.id}>{dt.displayName}</option>
           ))}
         </select>
+        {!selectedType && (
+          <p className="text-xs text-amber-600 mt-1.5 flex items-center gap-1">
+            <AlertCircle className="h-3 w-3" /> Please select a document type to continue.
+          </p>
+        )}
       </div>
 
       {/* Duplicate filename modal */}
@@ -314,9 +323,13 @@ export default function UploadPage() {
       {/* Drop zone */}
       <div
         {...getRootProps()}
-        className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
-          isDragActive ? 'border-blue-400 bg-blue-50' : 'border-gray-300 hover:border-gray-400 bg-white'
+        className={`border-2 border-dashed rounded-xl p-10 text-center transition-colors ${
+          !selectedType
+            ? 'border-gray-200 bg-gray-50 cursor-not-allowed opacity-60'
+            : isDragActive ? 'border-blue-400 bg-blue-50 cursor-pointer'
+            : 'border-gray-300 hover:border-gray-400 bg-white cursor-pointer'
         }`}
+        onClick={!selectedType ? e => e.stopPropagation() : undefined}
       >
         <input {...getInputProps()} />
         <Upload className="h-10 w-10 text-gray-400 mx-auto mb-3" />
@@ -398,7 +411,8 @@ export default function UploadPage() {
             <button
               className="btn-primary flex items-center gap-2"
               onClick={handleUpload}
-              disabled={isUploading}
+              disabled={isUploading || !selectedType}
+              title={!selectedType ? 'Select a document type first' : undefined}
             >
               {isUploading && <Loader2 className="h-4 w-4 animate-spin" />}
               Upload {files.filter(f => f.status === 'pending').length} file(s)

@@ -15,10 +15,12 @@ using OcrErpSystem.Application.ERP;
 using OcrErpSystem.Application.FieldMapping;
 using OcrErpSystem.Application.OCR;
 using OcrErpSystem.Application.Storage;
+using OcrErpSystem.Application.Trash;
 using OcrErpSystem.Application.Validation;
 using OcrErpSystem.Infrastructure.Auth;
 using OcrErpSystem.Application.Auth;
 using OcrErpSystem.Infrastructure.ERP;
+using OcrErpSystem.Infrastructure.Trash;
 using OcrErpSystem.Infrastructure.Persistence;
 using OcrErpSystem.Infrastructure.Persistence.Repositories;
 using OcrErpSystem.Infrastructure.Services;
@@ -48,6 +50,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<FieldMappingRepository>();
         services.AddScoped<BranchRepository>();
         services.AddScoped<SystemConfigRepository>();
+        services.AddScoped<VendorRepository>();
 
         // Application Services
         services.AddScoped<IDocumentService, DocumentService>();
@@ -56,6 +59,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ISystemConfigService, SystemConfigService>();
         services.AddScoped<IDashboardService, DashboardService>();
         services.AddScoped<IUserSyncService, UserSyncService>();
+        services.AddScoped<IVendorSyncService, VendorSyncService>();
+        services.AddScoped<ITrashPurgeService, TrashPurgeService>();
 
         // Storage
         services.AddScoped<IFileStorageService, LocalFileStorageService>();
@@ -64,7 +69,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IAcumaticaTokenContext, AcumaticaTokenContext>();
         services.AddHttpClient<IErpIntegrationService, AcumaticaClient>(client =>
         {
-            client.Timeout = TimeSpan.FromSeconds(30);
+            client.Timeout = TimeSpan.FromSeconds(90);
         });
 
         // Auth context
@@ -72,7 +77,9 @@ public static class ServiceCollectionExtensions
 
         // Validation
         services.AddScoped<IValidationService, ValidationService>();
+        services.AddSingleton<IOwnCompanyService, OwnCompanyService>();
         services.AddScoped<IVendorResolutionContext, VendorResolutionContext>();
+        services.AddScoped<IValidationFieldContext, ValidationFieldContext>();
         services.AddScoped<IFieldValidator, RequiredFieldValidator>();
         services.AddScoped<IFieldValidator, ErpVendorValidator>();
         services.AddScoped<IFieldValidator, ErpVendorNameValidator>();
@@ -80,6 +87,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IFieldValidator, ErpBranchValidator>();
         services.AddScoped<IFieldValidator, ErpApInvoiceValidator>();
         services.AddScoped<IFieldValidator, DynamicErpValidator>();
+        services.AddScoped<IFieldValidator, ErpVendorStatementValidator>();
         services.AddScoped<IFieldValidator, FormatValidator>();
 
         // OCR Pipeline

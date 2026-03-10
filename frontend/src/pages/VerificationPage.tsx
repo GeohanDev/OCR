@@ -24,7 +24,10 @@ export default function VerificationPage() {
   const [scale, setScale] = useState(1.0);
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [pdfViewerWidth, setPdfViewerWidth] = useState(0);
+  const [leftPct, setLeftPct] = useState(58);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const isDraggingRef = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   // Force the AppShell <main> to be a bounded, non-scrolling container so the
   // VerificationPage top bar stays pinned and only the inner panels scroll.
@@ -104,6 +107,24 @@ export default function VerificationPage() {
     setPdfError(err.message ?? 'Unknown error');
   }, []);
 
+  const startDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    const onMove = (ev: MouseEvent) => {
+      if (!isDraggingRef.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const pct = Math.min(80, Math.max(20, ((ev.clientX - rect.left) / rect.width) * 100));
+      setLeftPct(pct);
+    };
+    const onUp = () => {
+      isDraggingRef.current = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, []);
+
   return (
     <div className="flex flex-col h-full overflow-hidden -m-4 md:-m-6">
       {/* Top bar — flex-shrink-0 keeps it pinned while panels scroll independently */}
@@ -146,10 +167,10 @@ export default function VerificationPage() {
         </div>
       </div>
 
-      {/* Split pane — flex-1 min-h-0 so it fills remaining space and overflows internally */}
-      <div className="flex flex-col md:flex-row flex-1 min-h-0 overflow-hidden">
+      {/* Split pane */}
+      <div ref={containerRef} className="flex flex-row flex-1 min-h-0 overflow-hidden select-none">
         {/* Left: Document viewer */}
-        <div className="flex flex-col flex-1 min-h-0 overflow-hidden border-b md:border-b-0 md:border-r border-gray-200 bg-gray-100">
+        <div style={{ width: `${leftPct}%` }} className="flex flex-col min-h-0 overflow-hidden border-r border-gray-200 bg-gray-100">
           {/* Viewer toolbar */}
           <div className="flex items-center justify-between px-3 py-2 bg-white border-b border-gray-200 flex-shrink-0">
             <div className="flex items-center gap-2">
@@ -230,13 +251,20 @@ export default function VerificationPage() {
           </div>
         </div>
 
-        {/* Right: Field review panel — wider to show table columns, fully scrollable */}
-        <div className="w-full md:w-[580px] flex flex-col min-h-0 overflow-hidden bg-white flex-shrink-0">
+        {/* Resize divider */}
+        <div
+          onMouseDown={startDrag}
+          className="w-1.5 bg-gray-200 hover:bg-blue-400 active:bg-blue-500 cursor-col-resize flex-shrink-0 transition-colors"
+          title="Drag to resize"
+        />
+
+        {/* Right: Field review panel */}
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-white">
           <div className="px-4 py-3 border-b border-gray-200 flex-shrink-0">
             <h2 className="text-sm font-semibold text-gray-700">Extracted Fields</h2>
             <p className="text-xs text-gray-500">{fields.length} fields · click to highlight on document</p>
           </div>
-          <div className="flex-1 overflow-auto">
+          <div className="flex-1 min-h-0 flex flex-col">
             <FieldReviewPanel
               documentId={id!}
               fields={fields}

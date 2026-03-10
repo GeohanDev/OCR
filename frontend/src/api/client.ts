@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { TrashedDocument, TrashedFieldConfig, TrashedDocType } from '../types';
 
 // Empty default → requests go to /api/* → Vite proxy forwards to localhost:5000 in dev.
 // Set VITE_API_URL to the backend origin in production (e.g. https://api.example.com).
@@ -18,7 +19,7 @@ apiClient.interceptors.request.use((config) => {
   // Forward the user's Acumatica token on ERP and validation requests.
   // Validation runs call ERP validators internally, so they need the token too.
   const acumaticaToken = sessionStorage.getItem('acumatica_token');
-  if (acumaticaToken && (config.url?.includes('/erp/') || config.url?.includes('/validation/'))) {
+  if (acumaticaToken && (config.url?.includes('/erp/') || config.url?.includes('/validation/') || config.url?.includes('/vendors/'))) {
     config.headers['X-Acumatica-Token'] = acumaticaToken;
   }
 
@@ -106,10 +107,16 @@ export const erpApi = {
     apiClient.get('/erp/lookup/ap-invoices', { params: { invoiceNbr } }),
   getErpEntities: () =>
     apiClient.get('/erp/entities'),
+  getODataEntities: () =>
+    apiClient.get('/erp/odata-entities'),
+  getODataEntitiesRaw: () =>
+    apiClient.get('/erp/odata-entities/raw', { responseType: 'text' }),
   lookupGeneric: (entity: string, field: string, value: string) =>
     apiClient.get('/erp/lookup/generic', { params: { entity, field, value } }),
   probeEntity: (entity: string) =>
     apiClient.get(`/erp/probe/${entity}`),
+  lookupVendorBalance: (vendorId: string, period: string) =>
+    apiClient.get('/erp/lookup/vendor-balance', { params: { vendorId, period } }),
 };
 
 // ── Config ────────────────────────────────────────────────────────────
@@ -125,6 +132,8 @@ export const configApi = {
     apiClient.put(`/config/document-types/${typeId}/fields/${fieldId}`, data),
   deleteFieldMapping: (typeId: string, fieldId: string) =>
     apiClient.delete(`/config/document-types/${typeId}/fields/${fieldId}`),
+  deleteDocumentType: (typeId: string) =>
+    apiClient.delete(`/config/document-types/${typeId}`),
   reorderFieldMappings: (typeId: string, orderedIds: string[]) =>
     apiClient.post(`/config/document-types/${typeId}/fields/reorder`, orderedIds),
 };
@@ -134,6 +143,24 @@ export const dashboardApi = {
   getKpis: () => apiClient.get('/dashboard/kpis'),
   getAuditLogs: (params?: Record<string, unknown>) =>
     apiClient.get('/audit/logs', { params }),
+};
+
+// ── Vendors ───────────────────────────────────────────────────────────
+export const vendorApi = {
+  list: (params?: Record<string, unknown>) =>
+    apiClient.get('/vendors', { params }),
+  sync: () => apiClient.post('/vendors/sync'),
+};
+
+// ── Trash ─────────────────────────────────────────────────────────────
+export const trashApi = {
+  getTrashedDocuments: () => apiClient.get<TrashedDocument[]>('/trash/documents'),
+  restoreDocument: (id: string) => apiClient.post(`/trash/documents/${id}/restore`),
+  getTrashedFieldMappings: () => apiClient.get<TrashedFieldConfig[]>('/trash/field-mappings'),
+  restoreFieldMapping: (id: string) => apiClient.post(`/trash/field-mappings/${id}/restore`),
+  getTrashedDocTypes: () => apiClient.get<TrashedDocType[]>('/trash/document-types'),
+  restoreDocType: (id: string) => apiClient.post(`/trash/document-types/${id}/restore`),
+  purgeAll: () => apiClient.delete('/trash/purge'),
 };
 
 // ── Users ─────────────────────────────────────────────────────────────

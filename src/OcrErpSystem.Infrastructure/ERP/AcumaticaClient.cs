@@ -32,6 +32,7 @@ public class AcumaticaClient : IErpIntegrationService
 
     private string BaseUrl => _config["Acumatica:BaseUrl"] ?? throw new InvalidOperationException("Acumatica:BaseUrl not configured");
     private string ApiVersion => _config["Acumatica:ApiVersion"] ?? "24.200.001";
+    private string ApiEndpoint => _config["Acumatica:ApiEndpoint"] ?? "Default";
 
     private async Task<string> GetServiceAccountTokenAsync(CancellationToken ct)
     {
@@ -146,7 +147,7 @@ public class AcumaticaClient : IErpIntegrationService
         try
         {
             await SetAuthHeaderAsync(ct);
-            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/Vendor/{Uri.EscapeDataString(vendorId)}?$select=VendorID,VendorName,Status";
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/Vendor/{Uri.EscapeDataString(vendorId)}?$select=VendorID,VendorName,Status";
             var response = await _http.GetAsync(url, ct);
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 return new ErpLookupResult<VendorDto>(false, null, "Vendor not found");
@@ -195,8 +196,15 @@ public class AcumaticaClient : IErpIntegrationService
         {
             await SetAuthHeaderAsync(ct);
             var topClause = top.HasValue ? $"&$top={top.Value}" : string.Empty;
-            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/Vendor?$select=VendorID,VendorName,Status{topClause}";
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/Vendor?$select=VendorID,VendorName,Status{topClause}";
             var response = await _http.GetAsync(url, ct);
+
+            if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+            {
+                _logger.LogWarning("Acumatica auth failure fetching vendors: HTTP {Status}", (int)response.StatusCode);
+                throw new AcumaticaAuthException($"Acumatica returned HTTP {(int)response.StatusCode} — session expired or token invalid");
+            }
+
             response.EnsureSuccessStatusCode();
             var json = await response.Content.ReadAsStringAsync(ct);
             var arr = JsonDocument.Parse(json).RootElement;
@@ -208,9 +216,119 @@ public class AcumaticaClient : IErpIntegrationService
                     v.GetProperty("Status").GetProperty("value").GetString() == "Active"));
             return vendors;
         }
+        catch (AcumaticaAuthException)
+        {
+            throw; // let auth errors propagate so callers can return 424
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to fetch all vendors from Acumatica");
+            return [];
+        }
+    }
+
+    public async Task<IReadOnlyList<VendorFullDto>> GetAllVendorsFullAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            await SetAuthHeaderAsync(ct);
+
+            // Use the same minimal URL that the working lookup endpoint uses.
+            // $expand=MainAddress causes a 500 on some Acumatica versions — avoid it.
+            // Address and terms are fetched per-vendor only when the batch succeeds.
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/Vendor?$select=VendorID,VendorName,Status";
+            var response = await _http.GetAsync(url, ct);
+
+            if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+            {
+                _logger.LogWarning("Acumatica auth failure fetching full vendors: HTTP {Status}", (int)response.StatusCode);
+                throw new AcumaticaAuthException($"Acumatica returned HTTP {(int)response.StatusCode}");
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogError("Acumatica vendor fetch returned {Status}: {Body}", (int)response.StatusCode, errBody);
+                response.EnsureSuccessStatusCode();
+            }
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var arr = JsonDocument.Parse(json).RootElement;
+            var vendors = new List<VendorFullDto>();
+
+            foreach (var v in arr.EnumerateArray())
+            {
+                static string Str(JsonElement el, string key) =>
+                    el.TryGetProperty(key, out var p) && p.TryGetProperty("value", out var val)
+                        ? val.GetString() ?? "" : "";
+
+                vendors.Add(new VendorFullDto(
+                    VendorId:     Str(v, "VendorID"),
+                    VendorName:   Str(v, "VendorName"),
+                    IsActive:     Str(v, "Status") == "Active",
+                    AddressLine1: null,
+                    AddressLine2: null,
+                    City:         null,
+                    State:        null,
+                    PostalCode:   null,
+                    Country:      null,
+                    PaymentTerms: null));
+            }
+            _logger.LogInformation("Fetched {Count} vendors from Acumatica", vendors.Count);
+            return vendors;
+        }
+        catch (AcumaticaAuthException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to fetch full vendor list from Acumatica");
+            return [];
+        }
+    }
+
+    public async Task<IReadOnlyList<OpenBillDto>> FetchOpenBillsForVendorAsync(string vendorId, CancellationToken ct = default)
+    {
+        try
+        {
+            await SetAuthHeaderAsync(ct);
+            // Filter: Vendor eq vendorId and Status ne 'Closed' and Status ne 'Voided'
+            // Acumatica Bill.Vendor field stores the VendorID string.
+            var filter = Uri.EscapeDataString($"Vendor eq '{vendorId}' and Status ne 'Closed' and Status ne 'Voided'");
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/Bill?$filter={filter}&$select=ReferenceNbr,VendorRef,Balance,Amount,DueDate,Status";
+            _logger.LogInformation("FetchOpenBills for vendor {VendorId} → {Url}", vendorId, url);
+            var response = await _http.GetAsync(url, ct);
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var arr = JsonDocument.Parse(json).RootElement;
+            var bills = new List<OpenBillDto>();
+
+            foreach (var b in arr.EnumerateArray())
+            {
+                static string Str(JsonElement el, string key) =>
+                    el.TryGetProperty(key, out var p) && p.TryGetProperty("value", out var v) ? v.GetString() ?? "" : "";
+                static decimal Dec(JsonElement el, string key) =>
+                    el.TryGetProperty(key, out var p) && p.TryGetProperty("value", out var v) &&
+                    v.ValueKind == JsonValueKind.Number ? v.GetDecimal() : 0m;
+                static DateTimeOffset? Dt(JsonElement el, string key)
+                {
+                    if (!el.TryGetProperty(key, out var p) || !p.TryGetProperty("value", out var v)) return null;
+                    var s = v.GetString();
+                    return DateTimeOffset.TryParse(s, out var dt) ? dt : null;
+                }
+
+                bills.Add(new OpenBillDto(
+                    ReferenceNbr: Str(b, "ReferenceNbr"),
+                    VendorRef:    Str(b, "VendorRef"),
+                    Balance:      Dec(b, "Balance"),
+                    Amount:       Dec(b, "Amount"),
+                    DueDate:      Dt(b, "DueDate"),
+                    Status:       Str(b, "Status")));
+            }
+            return bills;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "FetchOpenBills failed for vendor {VendorId}", vendorId);
             return [];
         }
     }
@@ -221,9 +339,9 @@ public class AcumaticaClient : IErpIntegrationService
         {
             await SetAuthHeaderAsync(ct);
             // Acumatica 23.x+ exposes AP invoices as "Bill" (not "APInvoice").
-            // Omit $select so unknown/renamed fields don't cause 400/parse errors.
-            var filter = Uri.EscapeDataString($"RefNbr eq '{invoiceNbr}'");
-            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/Bill?$filter={filter}&$top=1";
+            // Field names: ReferenceNbr (internal ref), VendorRef (vendor's ref), Vendor (VendorID).
+            var filter = Uri.EscapeDataString($"ReferenceNbr eq '{invoiceNbr}'");
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/Bill?$filter={filter}&$top=1";
             _logger.LogInformation("AP Invoice lookup → {Url}", url);
             var response = await _http.GetAsync(url, ct);
             if (!response.IsSuccessStatusCode)
@@ -244,12 +362,12 @@ public class AcumaticaClient : IErpIntegrationService
                 el.TryGetProperty(key, out var p) && p.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDecimal() : 0m;
 
             var invoice = new ApInvoiceDto(
-                Str(first, "RefNbr"),
-                Str(first, "VendorID"),
-                Str(first, "DocDate"),
-                Dec(first, "CuryOrigDocAmt"),
+                Str(first, "ReferenceNbr"),
+                Str(first, "Vendor"),
+                Str(first, "Date"),
+                Dec(first, "Amount"),
                 Str(first, "Status"),
-                Str(first, "DocType"));
+                Str(first, "Type"));
             return new ErpLookupResult<ApInvoiceDto>(true, invoice, null);
         }
         catch (Exception ex)
@@ -259,12 +377,177 @@ public class AcumaticaClient : IErpIntegrationService
         }
     }
 
+    public async Task<ErpLookupResult<ApInvoiceDto>> LookupApInvoiceByVendorAsync(string vendorRef, string vendorName, CancellationToken ct = default)
+    {
+        try
+        {
+            static string Str(JsonElement el, string key) =>
+                el.TryGetProperty(key, out var p) && p.TryGetProperty("value", out var v) ? v.GetString() ?? "" : "";
+            static decimal Dec(JsonElement el, string key) =>
+                el.TryGetProperty(key, out var p) && p.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDecimal() : 0m;
+
+            // Step 1: resolve VendorID from vendor name.
+            // Bill records only return VendorID — VendorName is not available in the Bill response.
+            var vendorResult = await LookupVendorByNameAsync(vendorName, ct);
+            if (!vendorResult.Found)
+                return new ErpLookupResult<ApInvoiceDto>(false, null,
+                    $"Vendor '{vendorName}' not found in Acumatica — cannot verify invoice ownership.");
+
+            var resolvedVendorId = vendorResult.Data!.VendorId;
+
+            // Step 2: query Bill filtered by VendorRef (tolower for case-insensitive, exact fallback).
+            await SetAuthHeaderAsync(ct);
+            var normalizedRef = vendorRef.Trim();
+            var filterCI    = Uri.EscapeDataString($"tolower(VendorRef) eq '{normalizedRef.ToLowerInvariant()}'");
+            var filterExact = Uri.EscapeDataString($"VendorRef eq '{normalizedRef}'");
+
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/Bill?$filter={filterCI}&$top=10";
+            _logger.LogInformation("AP Invoice+Vendor lookup (VendorID={VendorId}) → {Url}", resolvedVendorId, url);
+            var response = await _http.GetAsync(url, ct);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.BadRequest ||
+                response.StatusCode == System.Net.HttpStatusCode.InternalServerError)
+            {
+                url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/Bill?$filter={filterExact}&$top=10";
+                _logger.LogDebug("tolower() unsupported for VendorRef — retrying exact: {Url}", url);
+                response = await _http.GetAsync(url, ct);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("AP Invoice+Vendor lookup {VendorRef} → {Status}: {Err}",
+                    vendorRef, (int)response.StatusCode, errBody);
+                return new ErpLookupResult<ApInvoiceDto>(false, null, $"ERP returned HTTP {(int)response.StatusCode}");
+            }
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var arr = JsonDocument.Parse(json).RootElement;
+            if (arr.GetArrayLength() == 0)
+                return new ErpLookupResult<ApInvoiceDto>(false, null,
+                    $"Invoice '{vendorRef}' not found in Acumatica.");
+
+            // Step 3: filter results by Vendor (VendorID) field — case-insensitive.
+            // Acumatica Bill endpoint returns "Vendor" (not "VendorID"), "ReferenceNbr" (not "RefNbr"),
+            // "Date" (not "DocDate"), "Type" (not "DocType"), "Amount" (not "CuryOrigDocAmt").
+            JsonElement? match = null;
+            foreach (var item in arr.EnumerateArray())
+            {
+                var billVendorId = Str(item, "Vendor");
+                if (string.Equals(billVendorId, resolvedVendorId, StringComparison.OrdinalIgnoreCase))
+                {
+                    match = item;
+                    break;
+                }
+            }
+
+            if (match is null)
+            {
+                _logger.LogInformation(
+                    "Invoice '{VendorRef}' found but Vendor field does not match '{ResolvedVendorId}'",
+                    vendorRef, resolvedVendorId);
+                return new ErpLookupResult<ApInvoiceDto>(false, null,
+                    $"Invoice '{vendorRef}' found in Acumatica but does not belong to vendor '{vendorName}'.");
+            }
+
+            var invoice = new ApInvoiceDto(
+                Str(match.Value, "ReferenceNbr"),
+                Str(match.Value, "Vendor"),
+                Str(match.Value, "Date"),
+                Dec(match.Value, "Amount"),
+                Str(match.Value, "Status"),
+                Str(match.Value, "Type"));
+            return new ErpLookupResult<ApInvoiceDto>(true, invoice, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ERP AP invoice+vendor lookup failed for {VendorRef}/{VendorName}", vendorRef, vendorName);
+            return new ErpLookupResult<ApInvoiceDto>(false, null, ex.Message);
+        }
+    }
+
+    public async Task<ErpLookupResult<IReadOnlyDictionary<string, string>>> LookupBillByVendorRefAndVendorIdAsync(
+        string vendorRef, string vendorId, CancellationToken ct = default)
+    {
+        try
+        {
+            await SetAuthHeaderAsync(ct);
+            var normalizedRef = vendorRef.Trim();
+            var filterCI    = Uri.EscapeDataString($"tolower(VendorRef) eq '{normalizedRef.ToLowerInvariant()}'");
+            var filterExact = Uri.EscapeDataString($"VendorRef eq '{normalizedRef}'");
+
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/Bill?$filter={filterCI}&$top=10";
+            _logger.LogInformation("Bill+VendorId lookup (VendorID={VendorId}) → {Url}", vendorId, url);
+            var response = await _http.GetAsync(url, ct);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.BadRequest ||
+                response.StatusCode == System.Net.HttpStatusCode.InternalServerError)
+            {
+                url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/Bill?$filter={filterExact}&$top=10";
+                _logger.LogDebug("tolower() unsupported for VendorRef — retrying exact: {Url}", url);
+                response = await _http.GetAsync(url, ct);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("Bill+VendorId lookup {VendorRef}/{VendorId} → {Status}: {Err}",
+                    vendorRef, vendorId, (int)response.StatusCode, errBody);
+                return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null,
+                    $"ERP returned HTTP {(int)response.StatusCode}");
+            }
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var arr  = JsonDocument.Parse(json).RootElement;
+            if (arr.GetArrayLength() == 0)
+                return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null,
+                    $"No Bill found where VendorRef='{vendorRef}'");
+
+            // Match by Vendor (VendorID) field — case-insensitive.
+            JsonElement? match = null;
+            foreach (var item in arr.EnumerateArray())
+            {
+                if (item.TryGetProperty("Vendor", out var vProp) &&
+                    vProp.TryGetProperty("value", out var vVal) &&
+                    string.Equals(vVal.GetString(), vendorId, StringComparison.OrdinalIgnoreCase))
+                {
+                    match = item;
+                    break;
+                }
+            }
+
+            if (match is null)
+            {
+                _logger.LogInformation(
+                    "Bill VendorRef='{VendorRef}' found but no entry matches Vendor='{VendorId}'",
+                    vendorRef, vendorId);
+                return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null,
+                    $"Bill '{vendorRef}' found but does not belong to vendor ID '{vendorId}'");
+            }
+
+            var record = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var prop in match.Value.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.Object &&
+                    prop.Value.TryGetProperty("value", out var val))
+                    record[prop.Name] = val.ToString();
+            }
+            _logger.LogInformation("Bill+VendorId matched — Amount={Amount}", record.GetValueOrDefault("Amount"));
+            return new ErpLookupResult<IReadOnlyDictionary<string, string>>(true, record, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Bill+VendorId lookup failed: VendorRef={VendorRef} VendorId={VendorId}", vendorRef, vendorId);
+            return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null, ex.Message);
+        }
+    }
+
     public async Task<ErpLookupResult<CurrencyDto>> LookupCurrencyAsync(string currencyCode, CancellationToken ct = default)
     {
         try
         {
             await SetAuthHeaderAsync(ct);
-            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/Currency/{Uri.EscapeDataString(currencyCode)}";
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/Currency/{Uri.EscapeDataString(currencyCode)}";
             var response = await _http.GetAsync(url, ct);
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 return new ErpLookupResult<CurrencyDto>(false, null, "Currency not found");
@@ -285,24 +568,194 @@ public class AcumaticaClient : IErpIntegrationService
         }
     }
 
+    // Acumatica entity name for branches — varies by version. Discovered via OData service doc.
+    private static string? _resolvedBranchEntity;
+    // All available entity names from the OData service document, cached per process.
+    private static IReadOnlyList<string>? _cachedODataEntities;
+
+    /// <summary>
+    /// Queries /entity/{endpoint}/{version}/ — the OData service document — which returns
+    /// a JSON array of all available entity names for this Acumatica instance and version.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetAvailableODataEntitiesAsync(CancellationToken ct = default)
+    {
+        // Don't use the cache here — let every explicit call hit Acumatica fresh so the test
+        // page always reflects the current state. The branch resolution path still benefits from
+        // the first-call cache in ResolveBranchEntityAsync.
+        // (Cache is only populated for internal resolution calls, not for the diagnostic endpoint.)
+
+        try
+        {
+            await SetAuthHeaderAsync(ct);
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/";
+            _logger.LogInformation("Querying OData service document: {Url}", url);
+            var response = await _http.GetAsync(url, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("OData service document returned {Status}", (int)response.StatusCode);
+                return [];
+            }
+            var json = await response.Content.ReadAsStringAsync(ct);
+            _logger.LogInformation("OData service document raw response (first 500 chars): {Json}",
+                json.Length > 500 ? json[..500] : json);
+
+            var doc  = JsonDocument.Parse(json);
+            var names = new List<string>();
+
+            // Format 1: Standard OData — { "value": [{ "name": "X", "url": "X" }, ...] }
+            if (doc.RootElement.TryGetProperty("value", out var values) && values.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in values.EnumerateArray())
+                {
+                    // Try "name" first, then "Name", then "EntityName", then "entityName"
+                    string? name = null;
+                    foreach (var key in new[] { "name", "Name", "EntityName", "entityName", "entity", "Entity" })
+                        if (item.TryGetProperty(key, out var p) && p.ValueKind == JsonValueKind.String)
+                        { name = p.GetString(); break; }
+
+                    // If item is a plain string
+                    if (name is null && item.ValueKind == JsonValueKind.String)
+                        name = item.GetString();
+
+                    if (!string.IsNullOrWhiteSpace(name)) names.Add(name!);
+                }
+            }
+            // Format 2: Root is an array of strings or objects
+            else if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in doc.RootElement.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.String)
+                    {
+                        names.Add(item.GetString()!);
+                    }
+                    else if (item.ValueKind == JsonValueKind.Object)
+                    {
+                        foreach (var key in new[] { "name", "Name", "EntityName", "entityName" })
+                            if (item.TryGetProperty(key, out var p) && p.ValueKind == JsonValueKind.String)
+                            { names.Add(p.GetString()!); break; }
+                    }
+                }
+            }
+            // Format 3: Flat object whose property names are entity names (e.g. { "Vendor": {...}, "Bill": {...} })
+            else if (doc.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                // Walk all top-level properties — if they look like entity names (Pascal-case, no spaces), collect them
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                {
+                    var n = prop.Name;
+                    if (!n.StartsWith('@') && !n.StartsWith('$') && n.Length > 1)
+                        names.Add(n);
+                }
+            }
+
+            _cachedODataEntities = names.Where(n => !string.IsNullOrWhiteSpace(n)).Distinct().ToList();
+            _logger.LogInformation("OData service document parsed {Count} entity names: {Names}",
+                _cachedODataEntities.Count,
+                string.Join(", ", _cachedODataEntities.Take(20)));
+            return _cachedODataEntities;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to query OData service document");
+        }
+        return [];
+    }
+
+    /// <summary>Returns the raw Acumatica OData service document response for debugging.</summary>
+    public async Task<string> GetODataServiceDocumentRawAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            await SetAuthHeaderAsync(ct);
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/";
+            var response = await _http.GetAsync(url, ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            return $"HTTP {(int)response.StatusCode} {response.StatusCode}\nContent-Type: {response.Content.Headers.ContentType}\n\n{body}";
+        }
+        catch (Exception ex)
+        {
+            return $"Error: {ex.Message}";
+        }
+    }
+
+    private async Task<string> ResolveBranchEntityAsync(CancellationToken ct)
+    {
+        if (_resolvedBranchEntity is not null) return _resolvedBranchEntity;
+
+        // First: try to discover the entity name from the OData service document.
+        var available = await GetAvailableODataEntitiesAsync(ct);
+        if (available.Count > 0)
+        {
+            // Look for "Company" first, then any entity whose name contains "branch".
+            var found = available.FirstOrDefault(n => n.Equals("Company", StringComparison.OrdinalIgnoreCase))
+                     ?? available.FirstOrDefault(n => n.Contains("branch", StringComparison.OrdinalIgnoreCase));
+            if (found is not null)
+            {
+                _resolvedBranchEntity = found;
+                _logger.LogInformation("Resolved branch entity from service doc: {Entity}", found);
+                return found;
+            }
+            _logger.LogWarning("No branch-related entity found in OData service document. Available: {Entities}",
+                string.Join(", ", available));
+        }
+
+        // Fallback: probe common names directly.
+        foreach (var candidate in new[] { "Company", "Branch", "GLBranch", "CompanyBranch", "Organization" })
+        {
+            var probe = await _http.GetAsync($"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/{candidate}?$top=1", ct);
+            if (probe.IsSuccessStatusCode)
+            {
+                _resolvedBranchEntity = candidate;
+                _logger.LogInformation("Resolved branch entity via probe: {Entity}", candidate);
+                return candidate;
+            }
+        }
+
+        _resolvedBranchEntity = "Company"; // last resort — error will surface in the validator
+        _logger.LogWarning("Could not resolve branch entity name — defaulting to 'Branch'");
+        return _resolvedBranchEntity;
+    }
+
     public async Task<ErpLookupResult<BranchDto>> LookupBranchAsync(string branchCode, CancellationToken ct = default)
     {
         try
         {
             await SetAuthHeaderAsync(ct);
-            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/Branch?$filter=BranchID eq '{Uri.EscapeDataString(branchCode)}'";
+
+            var entity = await ResolveBranchEntityAsync(ct);
+
+            // BranchID is always stored uppercase in Acumatica — normalise OCR input to uppercase
+            // for a fast exact-match OData filter (avoids expensive tolower() table scans).
+            var upperCode = branchCode.Trim().ToUpperInvariant();
+            var escaped   = Uri.EscapeDataString(upperCode);
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/{entity}?$filter=BranchID eq '{escaped}'";
             var response = await _http.GetAsync(url, ct);
             response.EnsureSuccessStatusCode();
             var json = await response.Content.ReadAsStringAsync(ct);
             var arr = JsonDocument.Parse(json).RootElement;
+
             if (arr.GetArrayLength() == 0)
-                return new ErpLookupResult<BranchDto>(false, null, "Branch not found");
+            {
+                // Fallback: try matching by BranchName
+                var escapedName = Uri.EscapeDataString(branchCode.Trim());
+                var fallbackUrl = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/{entity}?$filter=BranchName eq '{escapedName}'";
+                var fb = await _http.GetAsync(fallbackUrl, ct);
+                fb.EnsureSuccessStatusCode();
+                var fbJson = await fb.Content.ReadAsStringAsync(ct);
+                var fbArr = JsonDocument.Parse(fbJson).RootElement;
+                if (fbArr.GetArrayLength() == 0)
+                    return new ErpLookupResult<BranchDto>(false, null, "Branch not found");
+                arr = fbArr;
+            }
+
             var first = arr[0];
-            var branch = new BranchDto(
-                first.GetProperty("BranchID").GetProperty("value").GetString()!,
-                first.GetProperty("BranchID").GetProperty("value").GetString()!,
+            var branchId = first.GetProperty("BranchID").GetProperty("value").GetString()!;
+            var isActive = !first.TryGetProperty("Active", out var active)
+                || active.GetProperty("value").GetBoolean();
+            var branch = new BranchDto(branchId, branchId,
                 first.GetProperty("BranchName").GetProperty("value").GetString()!,
-                first.TryGetProperty("Active", out var active) && active.GetProperty("value").GetBoolean());
+                isActive);
             return new ErpLookupResult<BranchDto>(true, branch, null);
         }
         catch (Exception ex)
@@ -317,7 +770,7 @@ public class AcumaticaClient : IErpIntegrationService
         try
         {
             await SetAuthHeaderAsync(ct);
-            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/PurchaseOrder/{Uri.EscapeDataString(poNumber)}";
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/PurchaseOrder/{Uri.EscapeDataString(poNumber)}";
             var response = await _http.GetAsync(url, ct);
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 return new ErpLookupResult<PurchaseOrderDto>(false, null, "PO not found");
@@ -345,11 +798,11 @@ public class AcumaticaClient : IErpIntegrationService
     [
         new("Vendor",         "Vendor",          ["VendorID", "VendorName", "Status", "CurrencyID", "TaxRegistrationID"]),
         new("Customer",       "Customer",        ["CustomerID", "CustomerName", "Status", "CurrencyID"]),
-        new("Bill",           "AP Invoice (Bill)", ["RefNbr", "VendorRef", "VendorID", "VendorName", "DocDate", "Status", "DocType", "CuryID", "CuryOrigDocAmt"]),
+        new("Bill",           "AP Invoice (Bill)", ["ReferenceNbr", "VendorRef", "Vendor", "Date", "DueDate", "Status", "Type", "Amount", "Balance", "TaxTotal", "CurrencyID", "BranchID", "LocationID", "Description", "Terms", "PostPeriod", "Project", "ApprovedForPayment", "Hold"]),
         new("SOInvoice",      "Sales Invoice",   ["RefNbr", "CustomerID", "CustomerName", "DocDate", "Status", "DocType"]),
         new("PurchaseOrder",  "Purchase Order",  ["OrderNbr", "VendorID", "VendorName", "Status", "CuryID", "CuryOrderTotal"]),
         new("Currency",       "Currency",        ["CurrencyID", "Description"]),
-        new("Branch",         "Branch",          ["BranchID", "BranchName", "Active", "LedgerID"]),
+        new("Company",        "Company",          ["BranchID", "BranchName"]),
         new("InventoryItem",  "Inventory Item",  ["InventoryCD", "Descr", "ItemStatus", "ItemClass"]),
     ];
 
@@ -370,6 +823,13 @@ public class AcumaticaClient : IErpIntegrationService
             entity = aliasedEntity;
         }
 
+        // Resolve the actual branch entity name (Branch vs GLBranch depends on Acumatica version).
+        if (entity.Equals("Branch", StringComparison.OrdinalIgnoreCase) ||
+            entity.Equals("GLBranch", StringComparison.OrdinalIgnoreCase))
+        {
+            entity = await ResolveBranchEntityAsync(ct);
+        }
+
         try
         {
             await SetAuthHeaderAsync(ct);
@@ -381,7 +841,7 @@ public class AcumaticaClient : IErpIntegrationService
             var normalizedValue = value.Trim();
             var filterCI    = Uri.EscapeDataString($"tolower({field}) eq '{normalizedValue.ToLowerInvariant()}'");
             var filterExact = Uri.EscapeDataString($"{field} eq '{normalizedValue}'");
-            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/{entity}?$filter={filterCI}&$top=1";
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/{entity}?$filter={filterCI}&$top=1";
             _logger.LogInformation("Generic ERP lookup → {Url}", url);
             var response = await _http.GetAsync(url, ct);
 
@@ -390,7 +850,7 @@ public class AcumaticaClient : IErpIntegrationService
                 response.StatusCode == System.Net.HttpStatusCode.InternalServerError)
             {
                 _logger.LogDebug("tolower() not supported for {Entity}.{Field} — retrying with exact match", entity, field);
-                url = $"{BaseUrl}/entity/Default/{ApiVersion}/{entity}?$filter={filterExact}&$top=1";
+                url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/{entity}?$filter={filterExact}&$top=1";
                 _logger.LogInformation("Generic ERP lookup (exact) → {Url}", url);
                 response = await _http.GetAsync(url, ct);
             }
@@ -422,7 +882,7 @@ public class AcumaticaClient : IErpIntegrationService
                     $"No {entity} record found where {field} = \"{normalizedValue}\"");
 
             // Flatten the first record: each Acumatica field is { "value": "..." }
-            var record = new Dictionary<string, string>();
+            var record = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var prop in arr[0].EnumerateObject())
             {
                 if (prop.Value.ValueKind == JsonValueKind.Object &&
@@ -444,7 +904,11 @@ public class AcumaticaClient : IErpIntegrationService
         try
         {
             await SetAuthHeaderAsync(ct);
-            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/{entity}?$top=1";
+            // Resolve actual entity name for branch (version-dependent).
+            if (entity.Equals("Branch", StringComparison.OrdinalIgnoreCase) ||
+                entity.Equals("GLBranch", StringComparison.OrdinalIgnoreCase))
+                entity = await ResolveBranchEntityAsync(ct);
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/{entity}?$top=1";
             _logger.LogInformation("Probe entity → {Url}", url);
             var response = await _http.GetAsync(url, ct);
             if (!response.IsSuccessStatusCode)
@@ -460,7 +924,7 @@ public class AcumaticaClient : IErpIntegrationService
                 return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null,
                     "Entity exists but returned 0 records");
 
-            var record = new Dictionary<string, string>();
+            var record = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var prop in arr[0].EnumerateObject())
             {
                 if (prop.Value.ValueKind == JsonValueKind.Object &&
@@ -472,6 +936,48 @@ public class AcumaticaClient : IErpIntegrationService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Probe entity failed: {Entity}", entity);
+            return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null, ex.Message);
+        }
+    }
+
+    public async Task<ErpLookupResult<IReadOnlyDictionary<string, string>>> LookupVendorBalanceAsync(
+        string vendorId, string period, CancellationToken ct = default)
+    {
+        try
+        {
+            await SetAuthHeaderAsync(ct);
+            // APHistory stores AP-side period balances. FinPeriodID format: YYYYMM (e.g. "202501").
+            var filter = Uri.EscapeDataString($"VendorID eq '{vendorId}' and FinPeriodID eq '{period}'");
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/APHistory?$filter={filter}";
+            _logger.LogInformation("LookupVendorBalance VendorID={VendorId} Period={Period} → {Url}", vendorId, period, url);
+            var response = await _http.GetAsync(url, ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("LookupVendorBalance {Status}: {Err}", (int)response.StatusCode, errBody);
+                return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null,
+                    $"HTTP {(int)response.StatusCode}: {errBody}");
+            }
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var arr = JsonDocument.Parse(json).RootElement;
+            if (arr.GetArrayLength() == 0)
+                return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null,
+                    $"No APHistory record found for VendorID='{vendorId}' and FinPeriodID='{period}'.");
+
+            var record = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var prop in arr[0].EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.Object &&
+                    prop.Value.TryGetProperty("value", out var val))
+                    record[prop.Name] = val.ToString();
+            }
+            return new ErpLookupResult<IReadOnlyDictionary<string, string>>(true, record, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "LookupVendorBalance failed for VendorID={VendorId} Period={Period}", vendorId, period);
             return new ErpLookupResult<IReadOnlyDictionary<string, string>>(false, null, ex.Message);
         }
     }
@@ -526,18 +1032,22 @@ public class AcumaticaClient : IErpIntegrationService
         try
         {
             await SetAuthHeaderAsync(ct);
-            var url = $"{BaseUrl}/entity/Default/{ApiVersion}/Branch?$select=BranchID,BranchName,Active";
+            var entity = await ResolveBranchEntityAsync(ct);
+            var url = $"{BaseUrl}/entity/{ApiEndpoint}/{ApiVersion}/{entity}?$select=BranchID,BranchName";
             var response = await _http.GetAsync(url, ct);
             response.EnsureSuccessStatusCode();
             var json = await response.Content.ReadAsStringAsync(ct);
             var arr = JsonDocument.Parse(json).RootElement;
             var branches = new List<BranchDto>();
             foreach (var b in arr.EnumerateArray())
-                branches.Add(new BranchDto(
-                    b.GetProperty("BranchID").GetProperty("value").GetString()!,
-                    b.GetProperty("BranchID").GetProperty("value").GetString()!,
+            {
+                var bid = b.GetProperty("BranchID").GetProperty("value").GetString()!;
+                var bActive = !b.TryGetProperty("Active", out var bActiveEl)
+                    || bActiveEl.GetProperty("value").GetBoolean();
+                branches.Add(new BranchDto(bid, bid,
                     b.GetProperty("BranchName").GetProperty("value").GetString()!,
-                    b.TryGetProperty("Active", out var active) && active.GetProperty("value").GetBoolean()));
+                    bActive));
+            }
             return branches;
         }
         catch (Exception ex)

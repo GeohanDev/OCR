@@ -18,10 +18,32 @@ public class AppDbContext : DbContext
     public DbSet<Domain.Entities.ValidationResult> ValidationResults => Set<Domain.Entities.ValidationResult>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<SystemConfig> SystemConfigs => Set<SystemConfig>();
+    public DbSet<Vendor> Vendors => Set<Vendor>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        modelBuilder.Entity<Vendor>(e =>
+        {
+            e.ToTable("vendors");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.AcumaticaVendorId).HasColumnName("acumatica_vendor_id").HasMaxLength(100).IsRequired();
+            e.Property(x => x.VendorName).HasColumnName("vendor_name").HasMaxLength(500).IsRequired();
+            e.Property(x => x.AddressLine1).HasColumnName("address_line1").HasMaxLength(500);
+            e.Property(x => x.AddressLine2).HasColumnName("address_line2").HasMaxLength(500);
+            e.Property(x => x.City).HasColumnName("city").HasMaxLength(250);
+            e.Property(x => x.State).HasColumnName("state").HasMaxLength(100);
+            e.Property(x => x.PostalCode).HasColumnName("postal_code").HasMaxLength(50);
+            e.Property(x => x.Country).HasColumnName("country").HasMaxLength(100);
+            e.Property(x => x.PaymentTerms).HasColumnName("payment_terms").HasMaxLength(100);
+            e.Property(x => x.IsActive).HasColumnName("is_active");
+            e.Property(x => x.LastSyncedAt).HasColumnName("last_synced_at");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at");
+            e.Property(x => x.UpdatedAt).HasColumnName("updated_at");
+            e.HasIndex(x => x.AcumaticaVendorId).IsUnique();
+        });
 
         modelBuilder.Entity<Branch>(e =>
         {
@@ -65,8 +87,11 @@ public class AppDbContext : DbContext
             e.Property(x => x.DisplayName).HasColumnName("display_name").HasMaxLength(250).IsRequired();
             e.Property(x => x.PluginClass).HasColumnName("plugin_class").HasMaxLength(500).IsRequired();
             e.Property(x => x.IsActive).HasColumnName("is_active");
+            e.Property(x => x.IsDeleted).HasColumnName("is_deleted").HasDefaultValue(false);
+            e.Property(x => x.DeletedAt).HasColumnName("deleted_at");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
             e.HasIndex(x => x.TypeKey).IsUnique();
+            e.HasQueryFilter(x => !x.IsDeleted);
         });
 
         modelBuilder.Entity<FieldMappingConfig>(e =>
@@ -81,16 +106,22 @@ public class AppDbContext : DbContext
             e.Property(x => x.KeywordAnchor).HasColumnName("keyword_anchor").HasMaxLength(500);
             e.Property(x => x.PositionRule).HasColumnName("position_rule").HasColumnType("jsonb");
             e.Property(x => x.IsRequired).HasColumnName("is_required");
+            e.Property(x => x.IsManualEntry).HasColumnName("is_manual_entry").HasDefaultValue(false);
+            e.Property(x => x.IsCheckbox).HasColumnName("is_checkbox").HasDefaultValue(false);
             e.Property(x => x.AllowMultiple).HasColumnName("allow_multiple").HasDefaultValue(false);
             e.Property(x => x.ErpMappingKey).HasColumnName("erp_mapping_key").HasMaxLength(250);
             e.Property(x => x.ErpResponseField).HasColumnName("erp_response_field").HasMaxLength(250);
+            e.Property(x => x.DependentFieldKey).HasColumnName("dependent_field_key").HasMaxLength(150);
             e.Property(x => x.ConfidenceThreshold).HasColumnName("confidence_threshold").HasPrecision(5, 2);
             e.Property(x => x.DisplayOrder).HasColumnName("display_order");
             e.Property(x => x.IsActive).HasColumnName("is_active");
+            e.Property(x => x.IsDeleted).HasColumnName("is_deleted").HasDefaultValue(false);
+            e.Property(x => x.DeletedAt).HasColumnName("deleted_at");
             e.Property(x => x.CreatedAt).HasColumnName("created_at");
             e.Property(x => x.UpdatedAt).HasColumnName("updated_at");
             e.HasOne(x => x.DocumentType).WithMany(dt => dt.FieldMappingConfigs).HasForeignKey(x => x.DocumentTypeId);
             e.HasIndex(x => new { x.DocumentTypeId, x.FieldName }).IsUnique();
+            e.HasQueryFilter(x => !x.IsDeleted);
         });
 
         modelBuilder.Entity<Document>(e =>
@@ -117,6 +148,7 @@ public class AppDbContext : DbContext
             e.Property(x => x.Notes).HasColumnName("notes");
             e.Property(x => x.CurrentVersion).HasColumnName("current_version");
             e.Property(x => x.IsDeleted).HasColumnName("is_deleted");
+            e.Property(x => x.DeletedAt).HasColumnName("deleted_at");
             e.HasIndex(x => x.UploadedBy);
             e.HasIndex(x => x.Status);
             e.HasIndex(x => x.FileHash);
@@ -124,6 +156,9 @@ public class AppDbContext : DbContext
             e.HasOne(x => x.DocumentType).WithMany(dt => dt.Documents).HasForeignKey(x => x.DocumentTypeId);
             e.HasOne(x => x.UploadedByUser).WithMany(u => u.UploadedDocuments).HasForeignKey(x => x.UploadedBy).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Branch).WithMany(b => b.Documents).HasForeignKey(x => x.BranchId).OnDelete(DeleteBehavior.SetNull);
+            e.Property(x => x.VendorId).HasColumnName("vendor_id");
+            e.Property(x => x.VendorName).HasColumnName("vendor_name").HasMaxLength(500);
+            e.HasOne(x => x.Vendor).WithMany(v => v.Documents).HasForeignKey(x => x.VendorId).OnDelete(DeleteBehavior.SetNull);
         });
 
         modelBuilder.Entity<DocumentVersion>(e =>

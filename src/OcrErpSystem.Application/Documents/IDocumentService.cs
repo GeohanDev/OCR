@@ -14,6 +14,8 @@ public interface IDocumentService
     Task<Result> AssignDocumentTypeAsync(Guid documentId, Guid? documentTypeId, CancellationToken ct = default);
     Task<Result> DeleteAsync(Guid id, Guid requestingUserId, CancellationToken ct = default);
     Task<Result<DocumentDto>> AddVersionAsync(Guid documentId, UploadDocumentCommand cmd, CancellationToken ct = default);
+    Task<IReadOnlyList<TrashedDocumentDto>> GetTrashedAsync(Guid? requestingUserId, string requestingUserRole, CancellationToken ct = default);
+    Task<Result> RestoreAsync(Guid id, CancellationToken ct = default);
 }
 
 public record DocumentListQuery(
@@ -25,4 +27,5 @@ public record DocumentListQuery(
     DateTimeOffset? FromDate,
     DateTimeOffset? ToDate,
     int Page = 1,
-    int PageSize = 20);
+    int PageSize = 20,
+    Guid? VendorId = null);

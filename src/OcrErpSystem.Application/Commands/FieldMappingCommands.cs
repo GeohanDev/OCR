@@ -17,7 +17,10 @@ public record CreateFieldMappingCommand(
     string? ErpMappingKey,
     string? ErpResponseField,
     double ConfidenceThreshold,
-    int DisplayOrder);
+    int DisplayOrder,
+    string? DependentFieldKey = null,
+    bool IsManualEntry = false,
+    bool IsCheckbox = false);
 
 public record UpdateFieldMappingCommand(
     Guid FieldMappingId,
@@ -30,4 +33,7 @@ public record UpdateFieldMappingCommand(
     string? ErpMappingKey,
     string? ErpResponseField,
     double ConfidenceThreshold,
-    int DisplayOrder);
+    int DisplayOrder,
+    string? DependentFieldKey = null,
+    bool IsManualEntry = false,
+    bool IsCheckbox = false);

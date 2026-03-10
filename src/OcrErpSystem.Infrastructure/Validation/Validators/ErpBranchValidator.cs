@@ -8,7 +8,7 @@ public class ErpBranchValidator : IFieldValidator
 {
     private readonly IErpIntegrationService _erp;
     public ErpBranchValidator(IErpIntegrationService erp) => _erp = erp;
-    public IReadOnlyList<string> SupportedErpMappingKeys => ["BranchID"];
+    public IReadOnlyList<string> SupportedErpMappingKeys => ["BranchID", "Company:BranchID"];
     public bool RunForAllFields => false;
 
     public async Task<FieldValidationResult> ValidateAsync(ExtractedFieldDto field, FieldMappingConfigDto config, CancellationToken ct = default)
@@ -18,8 +18,15 @@ public class ErpBranchValidator : IFieldValidator
             return new FieldValidationResult("Skipped", "No value to validate.", "ErpBranch");
 
         var result = await _erp.LookupBranchAsync(value, ct);
-        return result.Found
-            ? new FieldValidationResult("Passed", null, "ErpBranch", result.Data)
-            : new FieldValidationResult("Failed", $"Branch '{value}' not found in ERP.", "ErpBranch");
+        if (!result.Found)
+            return new FieldValidationResult("Failed", $"Branch '{value}' not found in Acumatica.", "ErpBranch");
+
+        var branch = result.Data!;
+        if (!branch.IsActive)
+            return new FieldValidationResult("Warning",
+                $"Branch '{branch.BranchId}' ({branch.BranchName}) found but is inactive.", "ErpBranch", result.Data);
+
+        return new FieldValidationResult("Passed",
+            $"Branch verified — ID: {branch.BranchId}, Name: {branch.BranchName}", "ErpBranch", result.Data);
     }
 }

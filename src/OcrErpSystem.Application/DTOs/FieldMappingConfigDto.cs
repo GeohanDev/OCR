@@ -24,4 +24,7 @@ public record FieldMappingConfigDto(
     int DisplayOrder,
     bool IsActive,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string? DependentFieldKey = null,
+    bool IsManualEntry = false,
+    bool IsCheckbox = false);

@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using OcrErpSystem.Application.Auth;
 using OcrErpSystem.Application.OCR;
+using OcrErpSystem.Application.Validation;
 
 namespace OcrErpSystem.API.Controllers;
 
@@ -11,11 +12,13 @@ namespace OcrErpSystem.API.Controllers;
 public class OcrController : ControllerBase
 {
     private readonly IOcrService _ocr;
+    private readonly IValidationService _validation;
     private readonly ICurrentUserContext _user;
 
-    public OcrController(IOcrService ocr, ICurrentUserContext user)
+    public OcrController(IOcrService ocr, IValidationService validation, ICurrentUserContext user)
     {
         _ocr = ocr;
+        _validation = validation;
         _user = user;
     }
 
@@ -25,6 +28,8 @@ public class OcrController : ControllerBase
         try
         {
             var result = await _ocr.ProcessDocumentAsync(documentId, ct);
+            // Auto-run validation after every OCR run so results are always fresh.
+            await _validation.ValidateDocumentAsync(documentId, ct);
             return Ok(result);
         }
         catch (KeyNotFoundException)

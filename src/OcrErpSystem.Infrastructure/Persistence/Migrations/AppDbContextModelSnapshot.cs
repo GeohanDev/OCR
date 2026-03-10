@@ -167,6 +167,10 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("file_size_bytes");
 
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean")
                         .HasColumnName("is_deleted");
@@ -222,6 +226,15 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("uploaded_by");
 
+                    b.Property<Guid?>("VendorId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("vendor_id");
+
+                    b.Property<string>("VendorName")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("vendor_name");
+
                     b.HasKey("Id");
 
                     b.HasIndex("BranchId");
@@ -233,6 +246,8 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                     b.HasIndex("Status");
 
                     b.HasIndex("UploadedBy");
+
+                    b.HasIndex("VendorId");
 
                     b.ToTable("documents", (string)null);
                 });
@@ -249,6 +264,10 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
 
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
                     b.Property<string>("DisplayName")
                         .IsRequired()
                         .HasMaxLength(250)
@@ -258,6 +277,12 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean")
                         .HasColumnName("is_active");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_deleted");
 
                     b.Property<string>("PluginClass")
                         .IsRequired()
@@ -417,6 +442,15 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
 
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<string>("DependentFieldKey")
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)")
+                        .HasColumnName("dependent_field_key");
+
                     b.Property<string>("DisplayLabel")
                         .HasMaxLength(250)
                         .HasColumnType("character varying(250)")
@@ -449,6 +483,18 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean")
                         .HasColumnName("is_active");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_deleted");
+
+                    b.Property<bool>("IsManualEntry")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_manual_entry");
 
                     b.Property<bool>("IsRequired")
                         .HasColumnType("boolean")
@@ -692,6 +738,85 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                     b.ToTable("validation_results", (string)null);
                 });
 
+            modelBuilder.Entity("OcrErpSystem.Domain.Entities.Vendor", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id")
+                        .HasDefaultValueSql("gen_random_uuid()");
+
+                    b.Property<string>("AcumaticaVendorId")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("acumatica_vendor_id");
+
+                    b.Property<string>("VendorName")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("vendor_name");
+
+                    b.Property<string>("AddressLine1")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("address_line1");
+
+                    b.Property<string>("AddressLine2")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("address_line2");
+
+                    b.Property<string>("City")
+                        .HasMaxLength(250)
+                        .HasColumnType("character varying(250)")
+                        .HasColumnName("city");
+
+                    b.Property<string>("State")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("state");
+
+                    b.Property<string>("PostalCode")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("postal_code");
+
+                    b.Property<string>("Country")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("country");
+
+                    b.Property<string>("PaymentTerms")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("payment_terms");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_active");
+
+                    b.Property<DateTimeOffset>("LastSyncedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_synced_at");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AcumaticaVendorId")
+                        .IsUnique();
+
+                    b.ToTable("vendors", (string)null);
+                });
+
             modelBuilder.Entity("OcrErpSystem.Domain.Entities.AuditLog", b =>
                 {
                     b.HasOne("OcrErpSystem.Domain.Entities.User", "ActorUser")
@@ -726,11 +851,18 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("OcrErpSystem.Domain.Entities.Vendor", "Vendor")
+                        .WithMany("Documents")
+                        .HasForeignKey("VendorId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.Navigation("Branch");
 
                     b.Navigation("DocumentType");
 
                     b.Navigation("UploadedByUser");
+
+                    b.Navigation("Vendor");
                 });
 
             modelBuilder.Entity("OcrErpSystem.Domain.Entities.DocumentVersion", b =>
@@ -824,6 +956,11 @@ namespace OcrErpSystem.Infrastructure.Persistence.Migrations
                     b.Navigation("Document");
 
                     b.Navigation("ExtractedField");
+                });
+
+            modelBuilder.Entity("OcrErpSystem.Domain.Entities.Vendor", b =>
+                {
+                    b.Navigation("Documents");
                 });
 
             modelBuilder.Entity("OcrErpSystem.Domain.Entities.Branch", b =>

@@ -2,7 +2,7 @@ import { Link, useLocation, Outlet } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import {
   LayoutDashboard, FileText, Upload, Settings, Users,
-  ClipboardList, LogOut, Menu, X, Cpu, FlaskConical,
+  ClipboardList, LogOut, Menu, X, Cpu, FlaskConical, Building2, Trash2,
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -13,10 +13,12 @@ const navItems = [
 ];
 
 const adminItems = [
+  { to: '/admin/vendors',      label: 'Vendors',      icon: Building2 },
   { to: '/admin/users',        label: 'Users',        icon: Users },
   { to: '/admin/config',       label: 'Field Config', icon: Settings },
   { to: '/admin/audit',        label: 'Audit Log',    icon: ClipboardList },
   { to: '/admin/erp-test',     label: 'ERP Test',     icon: FlaskConical },
+  { to: '/admin/rubbish-bin',  label: 'Rubbish Bin',  icon: Trash2 },
 ];
 
 export default function AppShell() {

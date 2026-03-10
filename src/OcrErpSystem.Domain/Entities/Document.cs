@@ -24,10 +24,18 @@ public class Document
     public string? Notes { get; set; }
     public int CurrentVersion { get; set; } = 1;
     public bool IsDeleted { get; set; } = false;
+    public DateTimeOffset? DeletedAt { get; set; }
+
+    /// <summary>FK to local Vendor table. Set automatically after vendor validation passes.</summary>
+    public Guid? VendorId { get; set; }
+
+    /// <summary>Denormalized vendor name for quick display without a join.</summary>
+    public string? VendorName { get; set; }
 
     public DocumentType? DocumentType { get; set; }
     public User? UploadedByUser { get; set; }
     public Branch? Branch { get; set; }
+    public Vendor? Vendor { get; set; }
     public ICollection<DocumentVersion> Versions { get; set; } = [];
     public ICollection<OcrResult> OcrResults { get; set; } = [];
     public ICollection<ValidationResult> ValidationResults { get; set; } = [];

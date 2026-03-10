@@ -12,6 +12,21 @@ export interface User {
   createdAt: string;
 }
 
+export interface Vendor {
+  id: string;
+  acumaticaVendorId: string;
+  vendorName: string;
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+  paymentTerms?: string;
+  isActive: boolean;
+  lastSyncedAt: string;
+}
+
 export interface Document {
   id: string;
   documentTypeId?: string;
@@ -34,6 +49,8 @@ export interface Document {
   notes?: string;
   currentVersion: number;
   versions?: DocumentVersion[];
+  vendorId?: string;
+  vendorName?: string;
 }
 
 export interface DocumentVersion {
@@ -131,6 +148,9 @@ export interface FieldMappingConfig {
   allowMultiple: boolean;
   erpMappingKey?: string;
   erpResponseField?: string;
+  dependentFieldKey?: string;
+  isManualEntry?: boolean;
+  isCheckbox?: boolean;
   confidenceThreshold: number;
   displayOrder: number;
   isActive: boolean;
@@ -182,4 +202,31 @@ export interface PagedResult<T> {
   totalPages: number;
   hasNextPage: boolean;
   hasPreviousPage: boolean;
+}
+
+export interface TrashedDocument {
+  id: string;
+  originalFilename: string;
+  documentTypeName?: string;
+  status: string;
+  uploadedByUsername: string;
+  uploadedAt: string;
+  deletedAt: string;
+}
+
+export interface TrashedFieldConfig {
+  id: string;
+  documentTypeId: string;
+  documentTypeName: string;
+  fieldName: string;
+  displayLabel?: string;
+  deletedAt: string;
+}
+
+export interface TrashedDocType {
+  id: string;
+  typeKey: string;
+  displayName: string;
+  deletedAt: string;
+  fieldCount: number;
 }

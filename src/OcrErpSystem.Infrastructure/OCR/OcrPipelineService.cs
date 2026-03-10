@@ -89,6 +89,10 @@ public class OcrPipelineService : IOcrService
             if (doc.DocumentTypeId.HasValue)
                 fieldConfigs = await _fieldMapping.GetActiveConfigAsync(doc.DocumentTypeId.Value, ct);
 
+            // Separate manual-entry fields — they are not extracted by OCR/Claude.
+            var manualEntryConfigs = fieldConfigs.Where(c => c.IsManualEntry).ToList();
+            var ocrFieldConfigs    = fieldConfigs.Where(c => !c.IsManualEntry).ToList();
+
             // ── Route to Claude or Tesseract based on configuration ───────────
             IReadOnlyList<ProcessedPageImage> pages;
             IReadOnlyList<RawExtractedField> rawFields;
@@ -100,7 +104,7 @@ public class OcrPipelineService : IOcrService
             if (_claude.IsConfigured)
             {
                 pages = await _preprocessor.PreprocessForClaudeAsync(fileStream, mimeType, ct);
-                var claudeResult = await _claude.ExtractAsync(pages, fieldConfigs, ct);
+                var claudeResult = await _claude.ExtractAsync(pages, ocrFieldConfigs, ct);
                 rawText       = claudeResult.FullText;
                 rawFields     = claudeResult.Fields;
                 engineVersion = $"Claude/{claudeResult.ModelUsed}";
@@ -111,7 +115,7 @@ public class OcrPipelineService : IOcrService
                 pages = await _preprocessor.PreprocessAsync(fileStream, mimeType, ct);
                 var ocrOutput = await _engine.RecognizeAsync(pages, ct);
                 rawText       = ocrOutput.FullText;
-                rawFields     = _extractor.ExtractFields(ocrOutput, fieldConfigs);
+                rawFields     = _extractor.ExtractFields(ocrOutput, ocrFieldConfigs);
                 ocrBlocks     = ocrOutput.Blocks;
                 engineVersion = ocrOutput.EngineVersion;
                 fallbackConf  = ocrOutput.OverallConfidence;
@@ -126,7 +130,7 @@ public class OcrPipelineService : IOcrService
             {
                 var raw = rawFields[i];
                 var config    = fieldConfigs.FirstOrDefault(c => c.Id == raw.FieldMappingConfigId);
-                var normalized = _normalizer.Normalize(raw.RawValue, config?.ErpMappingKey);
+                var normalized = _normalizer.Normalize(raw.RawValue, config?.ErpMappingKey, raw.FieldName);
 
                 // Claude supplies per-field confidence directly; Tesseract uses the scorer formula.
                 var confidence = _claude.IsConfigured
@@ -165,6 +169,36 @@ public class OcrPipelineService : IOcrService
                                              raw.BoundingBox.Width, raw.BoundingBox.Height)
                         : null,
                     false, null));
+            }
+
+            // ── Add empty placeholder entries for manual-entry fields ──────────
+            // For AllowMultiple manual-entry fields (e.g. lineSettled), create one placeholder
+            // per table row so every row gets its own toggleable field instance.
+            int sortOffset = extractedFields.Count;
+            int tableRowCount = ocrFieldConfigs
+                .Where(c => c.AllowMultiple)
+                .Select(c => extractedFields.Count(f =>
+                    f.FieldName.Equals(c.FieldName, StringComparison.OrdinalIgnoreCase)))
+                .DefaultIfEmpty(0)
+                .Max();
+            foreach (var mc in manualEntryConfigs)
+            {
+                int count = mc.AllowMultiple && tableRowCount > 0 ? tableRowCount : 1;
+                for (int j = 0; j < count; j++)
+                {
+                    var placeholder = new ExtractedField
+                    {
+                        SortOrder            = sortOffset++,
+                        FieldName            = mc.FieldName,
+                        FieldMappingConfigId = mc.Id,
+                        RawValue             = null,
+                        NormalizedValue      = null,
+                        Confidence           = 1m   // confidence is irrelevant for manual fields
+                    };
+                    extractedFields.Add(placeholder);
+                    fieldDtos.Add(new ExtractedFieldDto(
+                        placeholder.Id, placeholder.FieldName, null, null, null, null, false, null));
+                }
             }
 
             sw.Stop();
@@ -251,6 +285,23 @@ public class OcrPipelineService : IOcrService
         field.CorrectedBy = correctedBy;
         field.CorrectedAt = DateTimeOffset.UtcNow;
         await _ocrRepo.UpdateFieldAsync(field, ct);
+
+        // Keep document.VendorName in sync when the vendorName OCR field is corrected.
+        if (field.FieldName.Equals("vendorName", StringComparison.OrdinalIgnoreCase))
+        {
+            var ocrResult = await _ocrRepo.GetByIdAsync(field.OcrResultId, ct);
+            if (ocrResult is not null)
+            {
+                var doc = await _docRepo.GetByIdAsync(ocrResult.DocumentId, ct);
+                var trimmed = correctedValue?.Trim();
+                if (doc is not null && doc.VendorName != trimmed)
+                {
+                    doc.VendorName = trimmed;
+                    await _docRepo.UpdateAsync(doc, ct);
+                }
+            }
+        }
+
         return new ExtractedFieldDto(
             field.Id, field.FieldName, field.RawValue, field.NormalizedValue,
             field.Confidence.HasValue ? (double)field.Confidence.Value : null,

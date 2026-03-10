@@ -7,6 +7,7 @@ using OcrErpSystem.Application.Commands;
 using OcrErpSystem.Application.Documents;
 using OcrErpSystem.Application.ERP;
 using OcrErpSystem.Domain.Enums;
+using AcumaticaAuthException = OcrErpSystem.Application.ERP.AcumaticaAuthException;
 
 namespace OcrErpSystem.API.Controllers;
 
@@ -102,11 +103,18 @@ public class ErpController : ControllerBase
         var cacheKey = top.HasValue ? $"vendors:top{top}" : "vendors:all";
         if (!_cache.TryGetValue(cacheKey, out var cached))
         {
-            var result = await _erp.GetAllVendorsAsync(top, ct);
-            // Only cache non-empty results — avoid caching auth failures
-            if (result.Count > 0)
-                _cache.Set(cacheKey, result, TimeSpan.FromMinutes(30));
-            cached = result;
+            try
+            {
+                var result = await _erp.GetAllVendorsAsync(top, ct);
+                // Only cache non-empty results — avoid caching auth failures
+                if (result.Count > 0)
+                    _cache.Set(cacheKey, result, TimeSpan.FromMinutes(30));
+                cached = result;
+            }
+            catch (AcumaticaAuthException ex)
+            {
+                return StatusCode(424, new { message = ex.Message });
+            }
         }
         return Ok(cached);
     }
@@ -126,6 +134,26 @@ public class ErpController : ControllerBase
 
     [HttpGet("entities")]
     public IActionResult GetEntityCatalog() => Ok(_erp.GetEntityCatalog());
+
+    /// <summary>
+    /// Queries the Acumatica OData service document — returns all entity names available
+    /// in the configured API version. Useful for discovering the correct entity names.
+    /// </summary>
+    [HttpGet("odata-entities")]
+    public async Task<IActionResult> GetODataEntities(CancellationToken ct)
+    {
+        // Force re-discovery by clearing the cache so every call hits Acumatica fresh.
+        var entities = await _erp.GetAvailableODataEntitiesAsync(ct);
+        return Ok(entities);
+    }
+
+    /// <summary>Returns the raw OData service document response exactly as Acumatica returns it.</summary>
+    [HttpGet("odata-entities/raw")]
+    public async Task<IActionResult> GetODataEntitiesRaw(CancellationToken ct)
+    {
+        var raw = await _erp.GetODataServiceDocumentRawAsync(ct);
+        return Content(raw, "text/plain");
+    }
 
     /// <summary>
     /// Test endpoint for the DynamicErpValidator path — same logic as Entity:Field ERP mapping keys.
@@ -165,5 +193,19 @@ public class ErpController : ControllerBase
             _cache.Set(cacheKey, cached, TimeSpan.FromHours(1));
         }
         return Ok(cached);
+    }
+
+    /// <summary>
+    /// Looks up the AP ending balance for a vendor in a specific financial period.
+    /// Queries Acumatica APHistory — period format: YYYYMM (e.g. "202501").
+    /// </summary>
+    [HttpGet("lookup/vendor-balance")]
+    public async Task<IActionResult> LookupVendorBalance(
+        [FromQuery] string vendorId, [FromQuery] string period, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(vendorId) || string.IsNullOrWhiteSpace(period))
+            return BadRequest("vendorId and period are required.");
+        var result = await _erp.LookupVendorBalanceAsync(vendorId, period, ct);
+        return Ok(result);
     }
 }

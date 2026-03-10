@@ -5,15 +5,22 @@ namespace OcrErpSystem.OCR;
 
 public interface IFieldNormalizer
 {
-    string? Normalize(string? rawValue, string? erpMappingKey);
+    string? Normalize(string? rawValue, string? erpMappingKey, string? fieldName = null);
 }
 
 public class FieldNormalizer : IFieldNormalizer
 {
-    public string? Normalize(string? rawValue, string? erpMappingKey)
+    public string? Normalize(string? rawValue, string? erpMappingKey, string? fieldName = null)
     {
         if (string.IsNullOrWhiteSpace(rawValue)) return null;
         var trimmed = rawValue.Trim();
+
+        // Detect date fields by ERP key or by field name containing "date".
+        bool isDateField =
+            erpMappingKey?.ToUpperInvariant() is "DATE" or "STATEMENTDATE" ||
+            (fieldName?.IndexOf("date", StringComparison.OrdinalIgnoreCase) >= 0);
+
+        if (isDateField) return NormalizeDate(trimmed);
 
         return erpMappingKey?.ToUpperInvariant() switch
         {
@@ -21,7 +28,6 @@ public class FieldNormalizer : IFieldNormalizer
             "CURRENCYID" => trimmed.ToUpperInvariant().Trim(),
             "BRANCHID" => trimmed.ToUpperInvariant().Trim(),
             "PONUMBER" or "PURCHASEORDER" => trimmed.Replace(" ", "").ToUpperInvariant(),
-            "DATE" or "STATEMENTDATE" => NormalizeDate(trimmed),
             "AMOUNT" or "TOTALAMOUNT" => NormalizeAmount(trimmed),
             _ => trimmed
         };
@@ -29,12 +35,24 @@ public class FieldNormalizer : IFieldNormalizer
 
     private static string NormalizeDate(string raw)
     {
-        var formats = new[] { "d/M/yyyy", "M/d/yyyy", "dd-MM-yyyy", "MM-dd-yyyy",
-                               "yyyy-MM-dd", "d-M-yy", "M/d/yy", "dd/MM/yyyy" };
-        if (DateTimeOffset.TryParseExact(raw, formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
-            return dt.ToString("yyyy-MM-dd");
-        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt2))
-            return dt2.ToString("yyyy-MM-dd");
+        // dd/MM/yyyy is the standard format in Malaysia — list it first so it takes priority
+        // over MM/dd/yyyy when both could match (e.g. "05/11/2025").
+        var formats = new[]
+        {
+            "dd/MM/yyyy", "d/M/yyyy", "dd/M/yyyy", "d/MM/yyyy",
+            "dd-MM-yyyy", "d-M-yyyy", "dd-M-yyyy", "d-MM-yyyy",
+            "dd.MM.yyyy", "d.M.yyyy", "dd.M.yyyy", "d.MM.yyyy",
+            "yyyy-MM-dd", "yyyy/MM/dd",
+            "dd MMM yyyy", "d MMM yyyy",
+            "d-M-yy", "dd/MM/yy", "dd.MM.yy",
+        };
+        if (DateOnly.TryParseExact(raw, formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+            return date.ToString("dd/MM/yyyy");
+        // Fallback only for ISO 8601 strings (4-digit year, dash separator) — avoids
+        // misreading dd/MM/yyyy OCR values as MM/dd/yyyy via culture-aware parsing.
+        if (raw.Length >= 10 && raw[4] == '-' &&
+            DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+            return DateOnly.FromDateTime(dt.DateTime).ToString("dd/MM/yyyy");
         return raw;
     }
 

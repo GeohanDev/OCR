@@ -7,6 +7,8 @@ public class DocumentType
     public string DisplayName { get; set; } = string.Empty;
     public string PluginClass { get; set; } = string.Empty;
     public bool IsActive { get; set; } = true;
+    public bool IsDeleted { get; set; } = false;
+    public DateTimeOffset? DeletedAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     public ICollection<FieldMappingConfig> FieldMappingConfigs { get; set; } = [];

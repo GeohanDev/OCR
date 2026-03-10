@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Configuration;
 using OcrErpSystem.Application.DTOs;
 using OcrErpSystem.Application.ERP;
 using OcrErpSystem.Application.Validation;
@@ -8,13 +7,13 @@ namespace OcrErpSystem.Infrastructure.Validation.Validators;
 public class ErpVendorNameValidator : IFieldValidator
 {
     private readonly IErpIntegrationService _erp;
-    private readonly IConfiguration _config;
+    private readonly IOwnCompanyService _ownCompany;
     private readonly IVendorResolutionContext _vendorContext;
 
-    public ErpVendorNameValidator(IErpIntegrationService erp, IConfiguration config, IVendorResolutionContext vendorContext)
+    public ErpVendorNameValidator(IErpIntegrationService erp, IOwnCompanyService ownCompany, IVendorResolutionContext vendorContext)
     {
         _erp = erp;
-        _config = config;
+        _ownCompany = ownCompany;
         _vendorContext = vendorContext;
     }
 
@@ -27,26 +26,22 @@ public class ErpVendorNameValidator : IFieldValidator
         if (string.IsNullOrWhiteSpace(value))
             return new FieldValidationResult("Skipped", "No value to validate.", "ErpVendorName");
 
-        // Reject own company names — OCR sometimes captures the recipient (us) instead of the sender (vendor).
-        // Configured via OwnCompany:Names array in appsettings.json, or OwnCompany:NamesFlat
-        // semicolon-delimited string when running in Docker (env var OWN_COMPANY_NAMES).
-        static string Norm(string s) =>
-            string.Join(" ", s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        var normalizedValue = Norm(value);
-
-        var ownNames = _config.GetSection("OwnCompany:Names").Get<string[]>()
-            ?? _config["OwnCompany:NamesFlat"]?.Split(';',
-                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            ?? [];
-
-        if (ownNames.Any(n => string.Equals(Norm(n), normalizedValue, StringComparison.OrdinalIgnoreCase)))
+        // OCR sometimes captures the recipient (our company) instead of the sender (vendor).
+        // The own-company list is configured via OwnCompany:Names / OWN_COMPANY_NAMES env var.
+        if (_ownCompany.IsOwnCompanyName(value))
+        {
+            _vendorContext.VendorValidationFailed = true;
             return new FieldValidationResult("Failed",
                 $"'{value}' is your own company name, not the vendor. Please correct this field.",
                 "ErpVendorName");
+        }
 
         var result = await _erp.LookupVendorByNameAsync(value, ct);
         if (!result.Found)
+        {
+            _vendorContext.VendorValidationFailed = true;
             return new FieldValidationResult("Failed", $"Vendor '{value}' not found in Acumatica.", "ErpVendorName");
+        }
         if (!result.Data!.IsActive)
             return new FieldValidationResult("Warning", $"Vendor '{value}' found (ID: {result.Data.VendorId}) but is inactive.", "ErpVendorName", result.Data);
 

@@ -21,8 +21,11 @@ interface FieldFormData {
   dataSource: 'header' | 'table';
   searchHint: string;        // maps to keywordAnchor — tells Claude where to look
   isRequired: boolean;
+  isManualEntry: boolean;    // if true, value is not extracted by OCR — user enters it manually
+  isCheckbox: boolean;       // if true, renders as a checkbox toggle in the table view
   erpMappingKey: string;
   erpResponseField: string;  // which key in the ERP response to show on pass (e.g. "vendorId", "RefNbr")
+  dependentFieldKey: string; // another field whose value must match for ERP cross-validation
   confidenceThreshold: number;
   displayOrder: number;
 }
@@ -32,8 +35,11 @@ const EMPTY_FORM: FieldFormData = {
   dataSource: 'header',
   searchHint: '',
   isRequired: false,
+  isManualEntry: false,
+  isCheckbox: false,
   erpMappingKey: '',
   erpResponseField: '',
+  dependentFieldKey: '',
   confidenceThreshold: 0.75,
   displayOrder: 0,
 };
@@ -46,9 +52,12 @@ function toApiData(form: FieldFormData) {
     regexPattern:        '',          // not used with Claude
     keywordAnchor:       form.searchHint,
     isRequired:          form.isRequired,
+    isManualEntry:       form.isManualEntry,
+    isCheckbox:          form.isCheckbox,
     allowMultiple:       form.dataSource === 'table',
     erpMappingKey:       form.erpMappingKey || null,
     erpResponseField:    form.erpResponseField || null,
+    dependentFieldKey:   form.dependentFieldKey || null,
     confidenceThreshold: form.confidenceThreshold,
     displayOrder:        form.displayOrder,
   };
@@ -61,6 +70,7 @@ export default function FieldMappingConfigPage() {
   // Document-type state
   const [showTypeForm, setShowTypeForm] = useState(false);
   const [typeForm, setTypeForm] = useState<TypeFormData>(EMPTY_TYPE_FORM);
+  const [showDeleteTypeModal, setShowDeleteTypeModal] = useState(false);
 
   // Field-mapping state
   const [selectedTypeId, setSelectedTypeId] = useState('');
@@ -115,6 +125,16 @@ export default function FieldMappingConfigPage() {
     onError: () => alert('Failed to delete field. Please try again.'),
   });
 
+  const deleteDocType = useMutation({
+    mutationFn: () => configApi.deleteDocumentType(selectedTypeId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['document-types'] });
+      setSelectedTypeId('');
+      setShowDeleteTypeModal(false);
+    },
+    onError: () => alert('Failed to delete document type. It may have associated documents.'),
+  });
+
   // ── Field form helpers ─────────────────────────────────────────────────
   const openCreate = () => { setForm(EMPTY_FORM); setEditingId(null); setShowForm(true); };
   const openEdit = (f: FieldMappingConfig) => {
@@ -124,8 +144,11 @@ export default function FieldMappingConfigPage() {
       dataSource:          f.allowMultiple ? 'table' : 'header',
       searchHint:          f.keywordAnchor ?? '',
       isRequired:          f.isRequired,
+      isManualEntry:       f.isManualEntry ?? false,
+      isCheckbox:          f.isCheckbox ?? false,
       erpMappingKey:       f.erpMappingKey ?? '',
       erpResponseField:    f.erpResponseField ?? '',
+      dependentFieldKey:   f.dependentFieldKey ?? '',
       confidenceThreshold: f.confidenceThreshold,
       displayOrder:        f.displayOrder,
     });
@@ -165,6 +188,14 @@ export default function FieldMappingConfigPage() {
             <Plus className="h-4 w-4" /> Add Field
           </button>
         )}
+        {selectedTypeId && (
+          <button
+            onClick={() => setShowDeleteTypeModal(true)}
+            className="flex items-center gap-1.5 text-sm text-destructive border border-red-200 hover:bg-red-50 rounded-md px-3 py-2 transition-colors"
+          >
+            <Trash2 className="h-4 w-4" /> Delete Type
+          </button>
+        )}
         {!docTypes?.length && (
           <p className="text-sm text-muted-foreground">No document types yet — click "New Document Type" to create one.</p>
         )}
@@ -182,15 +213,17 @@ export default function FieldMappingConfigPage() {
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground w-8">#</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Field Name</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">ERP Key</th>
+                <th className="px-4 py-3 text-left font-medium text-muted-foreground">Depends On</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Success Label</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Required</th>
+                <th className="px-4 py-3 text-left font-medium text-muted-foreground">Source</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Threshold</th>
                 <th className="px-4 py-3 text-right font-medium text-muted-foreground">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
               {isLoading && (
-                <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">Loading...</td></tr>
+                <tr><td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">Loading...</td></tr>
               )}
               {rows.map(f => (
                 <tr key={f.id} className="hover:bg-muted/30">
@@ -206,6 +239,11 @@ export default function FieldMappingConfigPage() {
                       : <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className="px-4 py-3">
+                    {f.dependentFieldKey
+                      ? <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 font-medium font-mono">{f.dependentFieldKey}</span>
+                      : <span className="text-muted-foreground">—</span>}
+                  </td>
+                  <td className="px-4 py-3">
                     {f.erpResponseField
                       ? <span className="text-xs font-mono px-2 py-0.5 rounded bg-blue-50 text-blue-700">{f.erpResponseField}</span>
                       : <span className="text-muted-foreground">—</span>}
@@ -214,6 +252,13 @@ export default function FieldMappingConfigPage() {
                     {f.isRequired
                       ? <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">Required</span>
                       : <span className="text-muted-foreground text-xs">Optional</span>}
+                  </td>
+                  <td className="px-4 py-3">
+                    {f.isCheckbox
+                      ? <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 font-medium">Checkbox</span>
+                      : f.isManualEntry
+                        ? <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 font-medium">Manual</span>
+                        : <span className="text-xs px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 font-medium">OCR</span>}
                   </td>
                   <td className="px-4 py-3 text-foreground">{Math.round(f.confidenceThreshold * 100)}%</td>
                   <td className="px-4 py-3 text-right">
@@ -233,7 +278,7 @@ export default function FieldMappingConfigPage() {
                 </tr>
               ))}
               {!isLoading && rows.length === 0 && (
-                <tr><td colSpan={7} className="px-4 py-6 text-center text-muted-foreground text-xs">{emptyMsg}</td></tr>
+                <tr><td colSpan={9} className="px-4 py-6 text-center text-muted-foreground text-xs">{emptyMsg}</td></tr>
               )}
             </tbody>
           </table>
@@ -317,6 +362,36 @@ export default function FieldMappingConfigPage() {
               >
                 {createDocType.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                 Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete Document Type confirmation modal ──────────────────────── */}
+      {showDeleteTypeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+          <div className="card p-6 w-full max-w-md space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-foreground text-destructive">Delete Document Type</h3>
+              <button onClick={() => setShowDeleteTypeModal(false)}><X className="h-5 w-5 text-muted-foreground" /></button>
+            </div>
+            <p className="text-sm text-foreground">
+              Are you sure you want to delete <span className="font-medium">{docTypes?.find(dt => dt.id === selectedTypeId)?.displayName}</span>?
+              This will also delete all its field mappings and cannot be undone.
+            </p>
+            {deleteDocType.isError && (
+              <p className="text-sm text-destructive">Failed to delete. The type may have associated documents.</p>
+            )}
+            <div className="flex justify-end gap-3 pt-2">
+              <button className="btn-secondary" onClick={() => setShowDeleteTypeModal(false)}>Cancel</button>
+              <button
+                className="btn-primary bg-destructive hover:bg-destructive/90 flex items-center gap-2"
+                onClick={() => deleteDocType.mutate()}
+                disabled={deleteDocType.isPending}
+              >
+                {deleteDocType.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                Delete
               </button>
             </div>
           </div>
@@ -426,6 +501,31 @@ export default function FieldMappingConfigPage() {
                 entities={erpEntities ?? []}
               />
 
+              {/* Dependent Field (cross-validation) */}
+              <Field label="Dependent Field (Cross-Validation)">
+                <select
+                  className="input text-sm"
+                  value={form.dependentFieldKey}
+                  onChange={e => setForm(f => ({ ...f, dependentFieldKey: e.target.value }))}
+                >
+                  <option value="">— None —</option>
+                  {fields
+                    ?.filter(f => f.fieldName !== form.fieldName)
+                    .sort((a, b) => a.displayOrder - b.displayOrder)
+                    .map(f => (
+                      <option key={f.id} value={f.fieldName}>
+                        {f.displayLabel ?? f.fieldName}
+                      </option>
+                    ))}
+                </select>
+                <p className="text-xs text-muted-foreground mt-1">
+                  When set, ERP validation will also cross-check this field's value against the selected field.
+                  Example: set <span className="font-mono">Invoice Number</span> to depend on <span className="font-mono">Vendor Name</span>
+                  so the invoice is verified to belong to that vendor.
+                  If the dependent field is an own-company name (e.g. Geohan), the cross-check is skipped automatically.
+                </p>
+              </Field>
+
               {/* Validation Success Label */}
               <Field label="Validation Success Label">
                 <input
@@ -470,6 +570,47 @@ export default function FieldMappingConfigPage() {
                 <span className="text-sm text-foreground">Required field</span>
                 <span className="text-xs text-muted-foreground">(validation will flag if missing)</span>
               </label>
+
+              {/* Manual entry toggle */}
+              <label className={`flex items-start gap-3 border rounded-lg p-3 cursor-pointer transition-colors ${
+                form.isManualEntry ? 'border-violet-400 bg-violet-50' : 'border-border hover:bg-muted/30'
+              }`}>
+                <input
+                  type="checkbox"
+                  checked={form.isManualEntry}
+                  onChange={e => setForm(f => ({ ...f, isManualEntry: e.target.checked, isCheckbox: e.target.checked ? f.isCheckbox : false }))}
+                  className="mt-0.5 rounded border-border accent-violet-600"
+                />
+                <div>
+                  <p className="text-sm font-medium text-foreground">Manual entry field</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Value is not extracted from the document. The user must enter it manually during review.
+                    OCR and Claude will skip this field entirely.
+                  </p>
+                </div>
+              </label>
+
+              {/* Checkbox display toggle — only shown for manual entry table fields */}
+              {form.isManualEntry && form.dataSource === 'table' && (
+                <label className={`flex items-start gap-3 border rounded-lg p-3 cursor-pointer transition-colors ml-4 ${
+                  form.isCheckbox ? 'border-violet-400 bg-violet-50' : 'border-border hover:bg-muted/30'
+                }`}>
+                  <input
+                    type="checkbox"
+                    checked={form.isCheckbox}
+                    onChange={e => setForm(f => ({ ...f, isCheckbox: e.target.checked }))}
+                    className="mt-0.5 rounded border-border accent-violet-600"
+                  />
+                  <div>
+                    <p className="text-sm font-medium text-foreground">Display as checkbox</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Renders a checkbox toggle per table row instead of a text input.
+                      Use this for boolean flags like "Settled by payment/credit note".
+                      Rows with this checked will show a "Settled" badge and be excluded from balance validation.
+                    </p>
+                  </div>
+                </label>
+              )}
 
             </div>
 

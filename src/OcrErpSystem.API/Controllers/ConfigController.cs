@@ -29,6 +29,14 @@ public class ConfigController : ControllerBase
         return CreatedAtAction(nameof(GetDocumentTypes), new { }, dt);
     }
 
+    [HttpDelete("document-types/{typeId:guid}")]
+    [Authorize(Policy = "AdminOnly")]
+    public async Task<IActionResult> DeleteDocumentType(Guid typeId, CancellationToken ct)
+    {
+        await _fieldMapping.DeleteDocumentTypeAsync(typeId, ct);
+        return NoContent();
+    }
+
     [HttpGet("document-types/{typeId:guid}/fields")]
     public async Task<IActionResult> GetFieldMappings(Guid typeId, CancellationToken ct)
     {

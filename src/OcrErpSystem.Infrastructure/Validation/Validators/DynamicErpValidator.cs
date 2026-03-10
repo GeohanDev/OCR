@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using OcrErpSystem.Application.DTOs;
 using OcrErpSystem.Application.ERP;
 using OcrErpSystem.Application.Validation;
@@ -11,13 +12,113 @@ namespace OcrErpSystem.Infrastructure.Validation.Validators;
 public class DynamicErpValidator : IFieldValidator
 {
     private readonly IErpIntegrationService _erp;
-    public DynamicErpValidator(IErpIntegrationService erp) => _erp = erp;
+    private readonly IVendorResolutionContext _vendorContext;
+    private readonly IValidationFieldContext _fieldContext;
+    private readonly IOwnCompanyService _ownCompany;
+    private readonly ILogger<DynamicErpValidator> _logger;
+
+    public DynamicErpValidator(IErpIntegrationService erp, IVendorResolutionContext vendorContext,
+        IValidationFieldContext fieldContext, IOwnCompanyService ownCompany,
+        ILogger<DynamicErpValidator> logger)
+    {
+        _erp = erp;
+        _vendorContext = vendorContext;
+        _fieldContext = fieldContext;
+        _ownCompany = ownCompany;
+        _logger = logger;
+    }
 
     public IReadOnlyList<string> SupportedErpMappingKeys => [];
     public bool RunForAllFields => false;
 
     // Only handles keys that contain ':' — "Entity:Field" format.
     public bool CanHandle(string erpMappingKey) => erpMappingKey.Contains(':');
+
+    // Date formats OCR commonly produces (DD/MM/YYYY is standard in Malaysia/Asia).
+    // Listed most-specific first so ParseExact prefers the right format.
+    private static readonly string[] DateFormats =
+    [
+        "dd/MM/yyyy", "d/M/yyyy", "dd/M/yyyy", "d/MM/yyyy",
+        "dd-MM-yyyy", "d-M-yyyy", "dd-M-yyyy", "d-MM-yyyy",
+        "dd.MM.yyyy", "d.M.yyyy", "dd.M.yyyy", "d.MM.yyyy",
+        "yyyy-MM-dd", "yyyy/MM/dd",
+        "dd MMM yyyy", "d MMM yyyy",
+        "dd/MM/yy", "d/M/yy", "dd.MM.yy",
+    ];
+
+    /// <summary>
+    /// Compares two field values:
+    /// 1. Numeric: strips currency symbols and parses as decimal.
+    /// 2. Date: parses both sides with common OCR and ISO 8601 formats, compares date-only.
+    /// 3. String: case-insensitive fallback.
+    /// </summary>
+    private static bool CompareValues(string extracted, string erpValue)
+    {
+        // 1. Numeric comparison
+        var cleanExtracted = CleanNumeric(extracted);
+        var cleanErp       = CleanNumeric(erpValue);
+
+        if (decimal.TryParse(cleanExtracted, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var dExtracted) &&
+            decimal.TryParse(cleanErp, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var dErp))
+            return dExtracted == dErp;
+
+        // 2. Date comparison — normalise both sides to a DateOnly before comparing.
+        //    Acumatica returns ISO 8601 (e.g. "2025-11-05T00:00:00"); OCR may return
+        //    "05/11/2025" (DD/MM/YYYY) or other regional formats.
+        if (TryParseDate(extracted.Trim(), out var dateExtracted) &&
+            TryParseDate(erpValue.Trim(),  out var dateErp))
+            return dateExtracted == dateErp;
+
+        // 3. String fallback
+        return string.Equals(extracted.Trim(), erpValue.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryParseDate(string value, out DateOnly result)
+    {
+        result = default;
+
+        // 1. Try explicit formats first — dd/MM/yyyy is first so regional OCR dates
+        //    are never misread as MM/dd/yyyy by the runtime's culture-aware parser.
+        if (DateOnly.TryParseExact(value, DateFormats,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out result))
+            return true;
+
+        // 2. Only fall back to DateTimeOffset.TryParse for ISO 8601 strings from Acumatica
+        //    (e.g. "2025-11-05T00:00:00"). These start with a 4-digit year so they won't
+        //    be ambiguous with dd/MM/yyyy OCR values.
+        if (value.Length >= 10 && value[4] == '-' &&
+            DateTimeOffset.TryParse(value,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var dto))
+        {
+            result = DateOnly.FromDateTime(dto.DateTime);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// If the value is a parseable date, returns it as dd/MM/yyyy for consistent display.
+    /// Non-date values are returned as-is.
+    /// </summary>
+    private static string NormaliseForDisplay(string value)
+    {
+        if (TryParseDate(value.Trim(), out var date))
+            return date.ToString("dd/MM/yyyy");
+        return value;
+    }
+
+    /// <summary>Strips currency codes, symbols and whitespace, leaving only digits, '.', ',', and '-'.</summary>
+    private static string CleanNumeric(string value)
+    {
+        // Remove known currency codes and symbols (RM, MYR, USD, $, etc.)
+        var cleaned = System.Text.RegularExpressions.Regex.Replace(value.Trim(), @"[A-Za-z$£€¥\s]", "");
+        return cleaned;
+    }
 
     public async Task<FieldValidationResult> ValidateAsync(
         ExtractedFieldDto field, FieldMappingConfigDto config, CancellationToken ct = default)
@@ -50,6 +151,127 @@ public class DynamicErpValidator : IFieldValidator
                 $"Vendor verified — ID: {vendorResult.Data.VendorId}", "DynamicErp", vendorResult.Data);
         }
 
+        bool isInvoiceEntity = entity.Contains("invoice", StringComparison.OrdinalIgnoreCase) ||
+                               entity.Contains("bill", StringComparison.OrdinalIgnoreCase);
+
+        // For invoice/bill entities with VendorRef field + a configured dependent vendor field:
+        // use a single REST call filtered by both VendorRef and VendorName.
+        if (isInvoiceEntity &&
+            matchField.Equals("VendorRef", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(config.DependentFieldKey) &&
+            _fieldContext.FieldValues.TryGetValue(config.DependentFieldKey, out var vendorName) &&
+            !string.IsNullOrWhiteSpace(vendorName))
+        {
+            if (_ownCompany.IsOwnCompanyName(vendorName))
+                return new FieldValidationResult("Warning",
+                    $"Vendor name '{vendorName}' is your own company name — please verify this document is from an external vendor.",
+                    "DynamicErp");
+
+            var invResult = await _erp.LookupApInvoiceByVendorAsync(value, vendorName, ct);
+            if (!invResult.Found)
+                return new FieldValidationResult("Warning",
+                    $"Invoice '{value}' not found for vendor '{vendorName}' in Acumatica.",
+                    "DynamicErp");
+
+            var inv = invResult.Data!;
+            return new FieldValidationResult("Passed",
+                $"Invoice verified — {inv.DocType} {inv.RefNbr}, Vendor: {inv.VendorId}, Date: {inv.DocDate}, Status: {inv.Status}",
+                "DynamicErp", inv);
+        }
+
+        // Cross-field verification: when DependentFieldKey is set, look up the record via the
+        // dependent field then compare the target field value — instead of filtering by the field
+        // itself (which fails for numeric/date fields or non-unique values like Amount).
+        if (!string.IsNullOrWhiteSpace(config.DependentFieldKey) &&
+            _fieldContext.FieldValues.TryGetValue(config.DependentFieldKey, out var depFieldValue) &&
+            !string.IsNullOrWhiteSpace(depFieldValue))
+        {
+            // Determine which Acumatica field to use for the lookup.
+            // Prefer the dependent field's own ERP key if it maps to the same entity (e.g. Bill:VendorRef).
+            // Fall back to VendorRef for invoice entities when the dependent field has a different key
+            // (e.g. ApInvoiceNbr, which is handled by ErpApInvoiceValidator but still holds the VendorRef value).
+            string depField;
+            if (_fieldContext.FieldErpKeys.TryGetValue(config.DependentFieldKey, out var depErpKey) &&
+                depErpKey.StartsWith(entity + ":", StringComparison.OrdinalIgnoreCase))
+                depField = depErpKey.Split(':', 2)[1].Trim();
+            else if (isInvoiceEntity)
+                depField = "VendorRef";
+            else
+                goto skipCrossField; // no way to determine lookup field for non-invoice entities
+
+            _logger.LogInformation(
+                "CrossField [{Field}={Value}] DependentFieldKey={DepKey} depValue={DepValue} depErpKey={DepErpKey} depField={DepField} resolvedVendorId={VendorId}",
+                matchField, value, config.DependentFieldKey, depFieldValue,
+                _fieldContext.FieldErpKeys.TryGetValue(config.DependentFieldKey, out var logDepErpKey) ? logDepErpKey : "(none)",
+                depField, _vendorContext.ResolvedVendorId ?? "(none)");
+
+            // When looking up a bill by VendorRef and we have a resolved vendor ID, use the
+            // vendor-filtered lookup to ensure we get the correct bill — not just any bill
+            // that happens to share the same VendorRef across different vendors.
+            ErpLookupResult<IReadOnlyDictionary<string, string>> billResult;
+            if (depField.Equals("VendorRef", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(_vendorContext.ResolvedVendorId))
+            {
+                billResult = await _erp.LookupBillByVendorRefAndVendorIdAsync(depFieldValue, _vendorContext.ResolvedVendorId, ct);
+                // If vendor-filtered lookup finds nothing (VendorId format mismatch between Vendor/Bill endpoints),
+                // fall back to unfiltered lookup so behaviour matches the ERP test page.
+                if (!billResult.Found)
+                {
+                    _logger.LogWarning(
+                        "Vendor-filtered bill lookup returned not found for VendorRef='{DepValue}' VendorId='{VendorId}' — falling back to unfiltered lookup",
+                        depFieldValue, _vendorContext.ResolvedVendorId);
+                    billResult = await _erp.LookupGenericAsync(entity, depField, depFieldValue, ct);
+                }
+            }
+            else
+            {
+                billResult = await _erp.LookupGenericAsync(entity, depField, depFieldValue, ct);
+            }
+
+            _logger.LogInformation(
+                "CrossField lookup {Entity}.{DepField}='{DepValue}' → Found={Found} ErrorMessage={Error}",
+                entity, depField, depFieldValue, billResult.Found, billResult.ErrorMessage);
+
+            if (!billResult.Found)
+                return new FieldValidationResult("Warning",
+                    $"Could not find {entity} where {depField}='{depFieldValue}' — cannot verify {matchField}.",
+                    "DynamicErp");
+
+            var allKeys = billResult.Data != null ? string.Join(", ", billResult.Data.Keys) : "(null)";
+            _logger.LogInformation("CrossField record keys returned: {Keys}", allKeys);
+
+            if (billResult.Data == null || !billResult.Data.TryGetValue(matchField, out var erpFieldValue))
+            {
+                _logger.LogWarning("CrossField: matchField '{MatchField}' not in record. Available keys: {Keys}", matchField, allKeys);
+                return new FieldValidationResult("Warning",
+                    $"Field '{matchField}' was not returned in the {entity} record from Acumatica.",
+                    "DynamicErp");
+            }
+
+            // Numeric comparison: strip currency symbols and non-numeric chars before parsing
+            // so OCR values like "MYR 20,624.65" or "RM20,624.65" match Acumatica "20624.6500".
+            var cleanExtracted = CleanNumeric(value);
+            var cleanErp = CleanNumeric(erpFieldValue);
+            bool matches = CompareValues(value, erpFieldValue);
+
+            // For display in messages, normalise dates to dd/MM/yyyy so both sides look the same.
+            string displayExtracted = NormaliseForDisplay(value);
+            string displayErp       = NormaliseForDisplay(erpFieldValue);
+
+            _logger.LogInformation(
+                "CrossField compare: extracted='{Extracted}' cleanExtracted='{CleanExtracted}' erpValue='{ErpValue}' cleanErp='{CleanErp}' matches={Matches}",
+                value, cleanExtracted, erpFieldValue, cleanErp, matches);
+
+            return matches
+                ? new FieldValidationResult("Passed",
+                    $"Verified — {entity} {matchField}: {displayErp}",
+                    "DynamicErp", billResult.Data)
+                : new FieldValidationResult("Warning",
+                    $"Mismatch — document has '{displayExtracted}' but Acumatica {entity} {matchField} is '{displayErp}'.",
+                    "DynamicErp", billResult.Data);
+        }
+
+        skipCrossField:
         var result = await _erp.LookupGenericAsync(entity, matchField, value, ct);
 
         if (!result.Found)
@@ -57,15 +279,21 @@ public class DynamicErpValidator : IFieldValidator
                 $"'{value}' not found in Acumatica {entity}.{matchField}. {result.ErrorMessage}",
                 "DynamicErp");
 
-        // Prefer a stable key field (RefNbr for invoices/bills) in the success message
-        // so the user sees the document reference number, not the search field value.
-        string successMsg;
-        if (result.Data != null &&
-            result.Data.TryGetValue("RefNbr", out var refNbr) &&
-            !string.IsNullOrWhiteSpace(refNbr))
-            successMsg = $"Invoice verified — RefNbr: {refNbr}";
-        else
-            successMsg = $"Verified in {entity} — {matchField}: {value}";
+        string? refNbr = null;
+        result.Data?.TryGetValue("RefNbr", out refNbr);
+        bool hasRefNbr = !string.IsNullOrWhiteSpace(refNbr);
+
+        string successMsg = hasRefNbr
+            ? $"Invoice verified — RefNbr: {refNbr}"
+            : $"Verified in {entity} — {matchField}: {value}";
+
+        // For invoice/bill results without a vendor filter, block if vendor validation already failed.
+        // But only do this for the main identifier (e.g., VendorRef or ApInvoiceNbr), not for
+        // dependent cross-fields (like Amount/Date) which shouldn't throw a vendor error if they match the retrieved record.
+        if ((isInvoiceEntity || hasRefNbr) && _vendorContext.VendorValidationFailed && matchField.Equals("VendorRef", StringComparison.OrdinalIgnoreCase))
+            return new FieldValidationResult("Warning",
+                $"{successMsg}, but vendor validation failed — cannot confirm this record belongs to the correct vendor.",
+                "DynamicErp", result.Data);
 
         return new FieldValidationResult("Passed", successMsg, "DynamicErp", result.Data);
     }

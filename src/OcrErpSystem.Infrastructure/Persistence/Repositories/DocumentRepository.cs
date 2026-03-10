@@ -17,6 +17,7 @@ public class DocumentRepository
             .Include(d => d.DocumentType)
             .Include(d => d.UploadedByUser)
             .Include(d => d.Branch)
+            .Include(d => d.Vendor)
             .FirstOrDefaultAsync(d => d.Id == id, ct);
 
     public async Task<Document?> GetByHashAsync(string fileHash, Guid uploadedBy, CancellationToken ct = default) =>
@@ -29,6 +30,7 @@ public class DocumentRepository
             .Include(d => d.DocumentType)
             .Include(d => d.UploadedByUser)
             .Include(d => d.Branch)
+            .Include(d => d.Vendor)
             .AsQueryable();
 
         bool isManager = query.RequestingUserRole.Equals("Manager", StringComparison.OrdinalIgnoreCase);
@@ -43,13 +45,21 @@ public class DocumentRepository
             q = q.Where(d => d.Status == status);
 
         if (!string.IsNullOrWhiteSpace(query.Search))
-            q = q.Where(d => d.OriginalFilename.Contains(query.Search));
+        {
+            var pattern = $"%{query.Search}%";
+            q = q.Where(d =>
+                EF.Functions.ILike(d.OriginalFilename, pattern) ||
+                (d.VendorName != null && EF.Functions.ILike(d.VendorName, pattern)));
+        }
 
         if (query.FromDate.HasValue)
             q = q.Where(d => d.UploadedAt >= query.FromDate.Value);
 
         if (query.ToDate.HasValue)
             q = q.Where(d => d.UploadedAt <= query.ToDate.Value);
+
+        if (query.VendorId.HasValue)
+            q = q.Where(d => d.VendorId == query.VendorId.Value);
 
         var total = await q.CountAsync(ct);
         var items = await q
@@ -79,5 +89,37 @@ public class DocumentRepository
         if (branchId.HasValue) q = q.Where(d => d.BranchId == branchId);
         if (userId.HasValue) q = q.Where(d => d.UploadedBy == userId);
         return await q.CountAsync(ct);
+    }
+
+    public async Task<List<Document>> GetTrashedAsync(Guid? requestingUserId, string requestingUserRole, CancellationToken ct = default)
+    {
+        var q = _db.Documents.IgnoreQueryFilters()
+            .Include(d => d.DocumentType)
+            .Include(d => d.UploadedByUser)
+            .Where(d => d.IsDeleted);
+        bool isAdmin = requestingUserRole.Equals("Admin", StringComparison.OrdinalIgnoreCase);
+        if (!isAdmin && requestingUserId.HasValue)
+            q = q.Where(d => d.UploadedBy == requestingUserId.Value);
+        return await q.OrderByDescending(d => d.DeletedAt).ToListAsync(ct);
+    }
+
+    public async Task<bool> RestoreAsync(Guid id, CancellationToken ct = default)
+    {
+        var doc = await _db.Documents.IgnoreQueryFilters().FirstOrDefaultAsync(d => d.Id == id, ct);
+        if (doc is null || !doc.IsDeleted) return false;
+        doc.IsDeleted = false;
+        doc.DeletedAt = null;
+        await _db.SaveChangesAsync(ct);
+        return true;
+    }
+
+    public async Task<int> PurgeExpiredAsync(DateTimeOffset cutoff, CancellationToken ct = default)
+    {
+        var expired = await _db.Documents.IgnoreQueryFilters()
+            .Where(d => d.IsDeleted && d.DeletedAt.HasValue && d.DeletedAt.Value < cutoff)
+            .ToListAsync(ct);
+        _db.Documents.RemoveRange(expired);
+        await _db.SaveChangesAsync(ct);
+        return expired.Count;
     }
 }

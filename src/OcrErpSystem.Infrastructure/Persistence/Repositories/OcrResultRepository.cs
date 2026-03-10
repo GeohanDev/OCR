@@ -16,6 +16,9 @@ public class OcrResultRepository
             .OrderByDescending(r => r.CreatedAt)
             .FirstOrDefaultAsync(r => r.DocumentId == documentId, ct);
 
+    public async Task<OcrResult?> GetByIdAsync(Guid ocrResultId, CancellationToken ct = default) =>
+        await _db.OcrResults.FirstOrDefaultAsync(r => r.Id == ocrResultId, ct);
+
     public async Task<ExtractedField?> GetFieldByIdAsync(Guid fieldId, CancellationToken ct = default) =>
         await _db.ExtractedFields
             .Include(f => f.FieldMappingConfig)

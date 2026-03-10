@@ -8,7 +8,7 @@ import StatusBadge from '../components/ui/StatusBadge';
 import type { Document, OcrResult, DocumentType, ExtractedField, FieldMappingConfig, ValidationResult } from '../types';
 import {
   ChevronLeft, Cpu, XCircle, FileText,
-  AlertTriangle, CheckCircle, Loader2, Clock, History, Edit2, Check, X, Pencil, CheckSquare, RefreshCw,
+  AlertTriangle, CheckCircle, Loader2, Clock, History, Edit2, Check, X, Pencil, CheckSquare, RefreshCw, StopCircle,
 } from 'lucide-react';
 
 // ─── EditableCell ─────────────────────────────────────────────────────────────
@@ -209,6 +209,8 @@ export default function DocumentDetailPage() {
   const triggerOcr = useMutation({
     mutationFn: () => ocrApi.process(id!),
     onSuccess: () => {
+      // Clear stale validation results immediately so old results don't persist after re-OCR.
+      queryClient.setQueryData(['validation', id], []);
       invalidate();
       queryClient.invalidateQueries({ queryKey: ['ocr-result', id] });
     },
@@ -229,25 +231,10 @@ export default function DocumentDetailPage() {
     onSuccess: () => { invalidate(); setEditingType(false); },
   });
 
-  const revalidate = useMutation({
-    mutationFn: () => validationApi.run(id!),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['validation', id] });
-    },
-    onError: (error: unknown) => {
-      const status = (error as { response?: { status?: number } })?.response?.status;
-      if (status === 424) logout('session_expired');
-    },
-  });
-
-  // Auto-run validation when OCR completes (Processing → PendingReview).
-  useEffect(() => {
-    if (prevStatusRef.current === 'Processing' && doc?.status === 'PendingReview') {
-      revalidate.mutate();
-    }
-    prevStatusRef.current = doc?.status;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc?.status]);
+  // Tracks whether the sequential "Run Validation" loop is running (for button state).
+  const [isRunning, setIsRunning] = useState(false);
+  // Set to true when the user clicks Stop — checked at each loop iteration.
+  const stopRequestedRef = useRef(false);
 
   const validateField = useMutation({
     mutationFn: (fieldId: string) =>
@@ -276,7 +263,8 @@ export default function DocumentDetailPage() {
       ocrApi.correctField(id!, fieldId, value),
     onSuccess: (_, { fieldId }) => {
       queryClient.invalidateQueries({ queryKey: ['ocr-result', id] });
-      validateField.mutate(fieldId);   // only re-validate the changed field
+      // Only re-validate if the field has ERP mapping — non-ERP fields have no validator to run.
+      if (validatableFieldIds.includes(fieldId)) validateField.mutate(fieldId);
     },
   });
 
@@ -284,21 +272,9 @@ export default function DocumentDetailPage() {
     correctField.mutate({ fieldId, value });
   }, [correctField]);
 
-  // Fire individual validations for every field so each row's spinner shows.
   const allFieldIds = useMemo(() =>
     (ocrResult?.fields ?? []).map(f => f.id),
   [ocrResult?.fields]);
-
-  const runAllValidations = useCallback(() => {
-    if (!sessionStorage.getItem('acumatica_token')) {
-      logout('session_expired');
-      return;
-    }
-    setSessionError(null);
-    allFieldIds.forEach(fid => validateField.mutate(fid));
-  }, [allFieldIds, validateField, logout]);
-
-  const isValidating = allFieldIds.some(id => pendingIds.has(id));
 
   const startEditType = () => { setPendingTypeId(doc?.documentTypeId ?? ''); setEditingType(true); };
 
@@ -319,6 +295,94 @@ export default function DocumentDetailPage() {
     for (const c of fieldConfigs ?? []) map[c.fieldName.toLowerCase()] = c;
     return map;
   }, [fieldConfigs]);
+
+  // Only fields that have an ERP mapping key get a spinner — fields with no validation
+  // configured don't need to show a checking state.
+  const validatableFieldIds = useMemo(() =>
+    (ocrResult?.fields ?? [])
+      .filter(f => {
+        const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
+        return cfg?.erpMappingKey && !cfg.isManualEntry;
+      })
+      .map(f => f.id),
+  [ocrResult?.fields, fieldConfigMap]);
+
+  // Groups header fields to validate simultaneously, then table rows sequentially row-by-row.
+  const runSequential = useCallback(async (fields: ExtractedField[]) => {
+    const validatable = fields.filter(f => {
+      const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
+      return cfg?.erpMappingKey && !cfg.isManualEntry;
+    });
+
+    // Provide a helper to check if a fieldName is a table field (re-implemented to avoid hook dependency cycle)
+    const checkIsTableField = (name: string) => {
+      const cfg = fieldConfigMap[name.toLowerCase()];
+      if (cfg) return cfg.allowMultiple;
+      return (fields.filter(f => f.fieldName === name).length) > 1;
+    };
+
+    const headerFieldsToRun = validatable.filter(f => !checkIsTableField(f.fieldName));
+    const tableFields = validatable.filter(f => checkIsTableField(f.fieldName));
+
+    // 1. Run all header fields simultaneously
+    if (headerFieldsToRun.length > 0 && !stopRequestedRef.current) {
+      await Promise.allSettled(headerFieldsToRun.map(f => validateField.mutateAsync(f.id)));
+    }
+
+    // 2. Group table fields by row index and run row-by-row
+    // Find unique column names in tableFields
+    const colNames = [...new Set(tableFields.map(f => f.fieldName))];
+    const groupedCols: Record<string, ExtractedField[]> = {};
+    for (const name of colNames) {
+      groupedCols[name] = fields.filter(f => f.fieldName === name);
+    }
+    const maxRows = Math.max(...Object.values(groupedCols).map(g => g.length), 0);
+
+    for (let i = 0; i < maxRows; i++) {
+      if (stopRequestedRef.current) break;
+      const rowFields = colNames
+        .map(name => groupedCols[name]?.[i])
+        .filter((f): f is ExtractedField => !!f && fieldConfigMap[f.fieldName.toLowerCase()]?.erpMappingKey != null);
+      if (rowFields.length > 0) {
+        // Run cells in the same row simultaneously
+        await Promise.allSettled(rowFields.map(f => validateField.mutateAsync(f.id)));
+      }
+    }
+  }, [fieldConfigMap, validateField, stopRequestedRef]);
+
+  const runAllValidations = useCallback(async () => {
+    if (!sessionStorage.getItem('acumatica_token')) {
+      logout('session_expired');
+      return;
+    }
+    setSessionError(null);
+    stopRequestedRef.current = false;
+    setIsRunning(true);
+    await runSequential(ocrResult?.fields ?? []);
+    // Only clear isRunning if the user hasn't already stopped it — prevents a
+    // re-render flash where the Stop button briefly reappears as Run Validation.
+    if (!stopRequestedRef.current) setIsRunning(false);
+  }, [runSequential, logout, ocrResult?.fields]);
+
+  const stopValidation = useCallback(() => {
+    stopRequestedRef.current = true;
+    setIsRunning(false);
+    setPendingIds(new Set());
+  }, []);
+
+  const isValidating = isRunning || allFieldIds.some(id => pendingIds.has(id));
+
+  // Auto-run validation when OCR completes (Processing → PendingReview).
+  useEffect(() => {
+    if (prevStatusRef.current === 'Processing' && doc?.status === 'PendingReview') {
+      queryClient.setQueryData(['validation', id], []);
+      stopRequestedRef.current = false;
+      setIsRunning(true);
+      runSequential(ocrResult?.fields ?? []).finally(() => { if (!stopRequestedRef.current) setIsRunning(false); });
+    }
+    prevStatusRef.current = doc?.status;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.status]);
 
   const isTableField = useCallback((fieldName: string) => {
     const cfg = fieldConfigMap[fieldName.toLowerCase()];
@@ -458,14 +522,23 @@ export default function DocumentDetailPage() {
         )}
 
         {doc.status !== 'Uploaded' && doc.status !== 'Processing' && (
-          <button
-            onClick={runAllValidations}
-            disabled={isValidating}
-            className="btn-secondary flex items-center gap-2 text-sm"
-          >
-            {isValidating ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            {isValidating ? 'Validating…' : 'Run Validation'}
-          </button>
+          isValidating ? (
+            <button
+              onClick={stopValidation}
+              className="btn-secondary flex items-center gap-2 text-sm text-destructive border-destructive/40 hover:bg-destructive/10"
+            >
+              <StopCircle className="h-4 w-4" />
+              Stop Validation
+            </button>
+          ) : (
+            <button
+              onClick={runAllValidations}
+              className="btn-secondary flex items-center gap-2 text-sm"
+            >
+              <RefreshCw className="h-4 w-4" />
+              Run Validation
+            </button>
+          )
         )}
 
         {doc.status !== 'Uploaded' && doc.status !== 'Processing' && (
@@ -741,11 +814,11 @@ export default function DocumentDetailPage() {
                         v.extractedFieldId && stmtRowFieldIds.includes(v.extractedFieldId));
                       const stmtRowPending = stmtRowFieldIds.some(fid => pendingIds.has(fid));
                       // Helper: returns Tailwind classes for a single statement cell
-                      const stmtCellClass = (f: ExtractedField | undefined) => {
+                        const stmtCellClass = (f: ExtractedField | undefined) => {
                         if (!f) return '';
                         const s = getValidationStatus(f.id);
                         const p = pendingIds.has(f.id);
-                        return p ? 'bg-blue-50' : s === 'Failed' ? 'bg-red-100/80 border-b border-red-300' : s === 'Warning' ? 'bg-amber-50/80 border-b border-amber-200' : s === 'Passed' ? 'bg-green-50/60' : '';
+                        return p ? 'bg-muted/30' : s === 'Failed' ? 'bg-red-100/80 border-b border-red-300' : s === 'Warning' ? 'bg-amber-50/80 border-b border-amber-200' : s === 'Passed' ? 'bg-green-50/60' : '';
                       };
                       const stmtCellTitle = (f: ExtractedField | undefined) => f ? (allValidations.filter(v => v.extractedFieldId === f.id && v.message).map(v => v.message).join('\n') || undefined) : undefined;
                       const docTypeRaw = row.documentType
@@ -842,23 +915,34 @@ export default function DocumentDetailPage() {
 
       {/* ── Header Fields (single-value) ────────────────────────────── */}
       {ocrResult && !hasStatementData && headerFields.length > 0 && (
-        <div className="card p-5 space-y-3">
+        <div className={`card p-5 space-y-3 relative overflow-hidden transition-all ${isRunning ? 'bg-muted/30' : ''}`}>
+          {isRunning && (
+            <div className="absolute inset-x-0 top-0 h-1 bg-primary/20">
+              <div className="h-full bg-primary animate-pulse w-full"></div>
+            </div>
+          )}
           <div className="flex items-center justify-between">
-            <h2 className="font-semibold text-foreground">Document Fields</h2>
+            <h2 className="font-semibold text-foreground flex items-center gap-2">
+              Document Fields
+              {isRunning && headerFields.some(f => pendingIds.has(f.id)) && <span className="text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full animate-pulse flex items-center gap-1.5"><Loader2 className="h-3 w-3 animate-spin"/> Validating...</span>}
+            </h2>
             <p className="text-xs text-muted-foreground flex items-center gap-1">
               <Pencil className="h-3 w-3" /> Click any value to edit
             </p>
           </div>
           <div className="divide-y divide-border/50 text-sm">
             {headerFields.map(field => {
-              const label = fieldConfigMap[field.fieldName.toLowerCase()]?.displayLabel ?? field.fieldName;
-              const isLow = (field.confidence ?? 1) < 0.7;
+              const cfg = fieldConfigMap[field.fieldName.toLowerCase()];
+              const label = cfg?.displayLabel ?? field.fieldName;
+              const isManual = cfg?.isManualEntry ?? false;
+              const isLow = !isManual && (field.confidence ?? 1) < 0.7;
               const status = getValidationStatus(field.id);
               const isPending = pendingIds.has(field.id);
               const msgs = getValidationMsgs(field.id);
               return (
                 <div key={field.id} className={`py-2 border-l-2 pl-2 -ml-2 transition-colors ${
-                  isPending      ? 'border-l-blue-300 bg-blue-50/30'
+                  isManual       ? 'border-l-violet-400 bg-violet-50/40'
+                  : isPending    ? 'border-l-muted bg-muted/20'
                   : status === 'Failed'  ? 'border-l-red-400 bg-red-50/60'
                   : status === 'Warning' ? 'border-l-amber-400 bg-amber-50/50'
                   : status === 'Passed'  ? 'border-l-green-400 bg-green-50/30'
@@ -867,36 +951,44 @@ export default function DocumentDetailPage() {
                 }`}>
                   <div className="flex justify-between gap-4 items-center">
                     <dt className="text-muted-foreground text-xs font-medium uppercase tracking-wide flex-shrink-0 flex items-center gap-1">
-                      {isPending        && <Loader2       className="h-3 w-3 text-blue-500 animate-spin" />}
-                      {!isPending && status === 'Failed'  && <XCircle       className="h-3 w-3 text-red-500" />}
-                      {!isPending && status === 'Warning' && <AlertTriangle  className="h-3 w-3 text-amber-500" />}
-                      {!isPending && status === 'Passed'  && <CheckCircle    className="h-3 w-3 text-green-500" />}
+                      {!isManual && isPending        && <Loader2       className="h-3 w-3 text-blue-500 animate-spin" />}
+                      {!isManual && !isPending && status === 'Failed'  && <XCircle       className="h-3 w-3 text-red-500" />}
+                      {!isManual && !isPending && status === 'Warning' && <AlertTriangle  className="h-3 w-3 text-amber-500" />}
+                      {!isManual && !isPending && status === 'Passed'  && <CheckCircle    className="h-3 w-3 text-green-500" />}
                       {label}
                     </dt>
                     <dd className="flex items-center gap-1.5">
                       <EditableCell field={field} onSave={save} align="right" />
-                      <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 ${
-                        isLow ? 'bg-red-100 text-red-800'
-                        : (field.confidence ?? 0) >= 0.9 ? 'bg-green-100 text-green-800'
-                        : 'bg-amber-100 text-amber-800'
-                      }`}>
-                        {Math.round((field.confidence ?? 0) * 100)}%
-                      </span>
+                      {isManual
+                        ? <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 font-medium flex-shrink-0">Manual</span>
+                        : <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 ${
+                            isLow ? 'bg-red-100 text-red-800'
+                            : (field.confidence ?? 0) >= 0.9 ? 'bg-green-100 text-green-800'
+                            : 'bg-amber-100 text-amber-800'
+                          }`}>
+                            {Math.round((field.confidence ?? 0) * 100)}%
+                          </span>
+                      }
                     </dd>
                   </div>
+                  {isManual && !field.correctedValue && !field.normalizedValue && !field.rawValue && (
+                    <p className="text-[10px] text-violet-500 italic mt-0.5">Enter this value manually</p>
+                  )}
                   {msgs.map(v => {
-                    const label = v.status === 'Passed' ? '✓ In ERP'
+                    const erpPassValue = v.status === 'Passed' && v.erpResponseField
+                      ? getErpValue(v.erpReference, v.erpResponseField)
+                      : undefined;
+                    const label = v.status === 'Passed'
+                      ? (erpPassValue ? `✓ ${v.erpResponseField}: ${erpPassValue}` : '✓ In ERP')
                       : v.status === 'Warning' ? '⚠ Review'
                       : '✗ Not found';
                     return (
                       <div key={v.id} className="mt-0.5 space-y-0.5">
-                        <span
-                          className={`text-xs px-1.5 py-0.5 rounded font-medium font-mono ${
-                            v.status === 'Passed' ? 'bg-green-100 text-green-700'
-                            : v.status === 'Warning' ? 'bg-amber-100 text-amber-700'
-                            : 'bg-red-100 text-red-700'
-                          }`}
-                        >
+                        <span className={`text-xs px-1.5 py-0.5 rounded font-medium font-mono ${
+                          v.status === 'Passed' ? 'bg-green-100 text-green-700'
+                          : v.status === 'Warning' ? 'bg-amber-100 text-amber-700'
+                          : 'bg-red-100 text-red-700'
+                        }`}>
                           {label}
                         </span>
                         {v.message && (
@@ -918,11 +1010,17 @@ export default function DocumentDetailPage() {
 
       {/* ── Table Fields (multiple rows) ─────────────────────────────── */}
       {ocrResult && !hasStatementData && tableRowCount > 0 && (
-        <div className="border border-border rounded-lg">
-          <div className="p-4 border-b border-border flex items-center justify-between">
-            <h2 className="font-semibold text-foreground">
+        <div className={`border border-border rounded-lg relative overflow-hidden transition-all ${isRunning ? 'shadow-sm bg-muted/10' : ''}`}>
+          {isRunning && (
+            <div className="absolute inset-x-0 top-0 h-1 bg-primary/20 z-10">
+               <div className="h-full bg-primary animate-pulse w-full"></div>
+            </div>
+          )}
+          <div className={`p-4 border-b flex items-center justify-between ${isRunning ? 'bg-muted/20' : 'border-border'}`}>
+            <h2 className="font-semibold text-foreground flex items-center gap-2">
               Table Data
-              {tableRowCount > 0 && <span className="ml-1.5 text-sm font-normal text-muted-foreground">({tableRowCount} rows)</span>}
+              {tableRowCount > 0 && <span className="text-sm font-normal text-muted-foreground">({tableRowCount} rows)</span>}
+              {isRunning && <span className="text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full animate-pulse flex items-center gap-1.5"><Loader2 className="h-3 w-3 animate-spin"/> Validating Row by Row</span>}
             </h2>
             <p className="text-xs text-muted-foreground flex items-center gap-1">
               <Pencil className="h-3 w-3" /> Click to edit
@@ -964,6 +1062,7 @@ export default function DocumentDetailPage() {
                     ? getErpValue(passedV.erpReference, passedV.erpResponseField)
                     : undefined;
                   const passedSuccessLabel = passedValue ? `✓ ${passedV!.erpResponseField}: ${passedValue}` : '✓';
+                  const warningV = rowValidations.find(v => v.status === 'Warning');
                   return (
                     <tr key={i} className={`hover:bg-muted/30 ${avgConf < 0.7 ? 'bg-red-50/50' : ''}`}>
                       <td className="px-3 py-2 text-center text-muted-foreground">{i + 1}</td>
@@ -971,11 +1070,11 @@ export default function DocumentDetailPage() {
                         const cellField = tableFieldGroups[name]?.[i];
                         const cellStatus = cellField ? getValidationStatus(cellField.id) : null;
                         const cellPending = cellField ? pendingIds.has(cellField.id) : false;
-                        return (
+                         return (
                           <td
                             key={name}
                             className={`px-3 py-2 transition-colors ${
-                              cellPending      ? 'bg-blue-50'
+                              cellPending      ? 'bg-muted/30'
                               : cellStatus === 'Failed'  ? 'bg-red-100/80 border-b border-red-300'
                               : cellStatus === 'Warning' ? 'bg-amber-50/80 border-b border-amber-200'
                               : cellStatus === 'Passed'  ? 'bg-green-50/60'
@@ -995,7 +1094,10 @@ export default function DocumentDetailPage() {
                         ) : rowStatus === 'Failed' ? (
                           <span className="text-xs font-medium text-red-600">✗ Not found</span>
                         ) : rowStatus === 'Warning' ? (
-                          <span className="text-xs font-medium text-amber-600">⚠ Review</span>
+                          <div className="flex flex-col items-center justify-center text-center w-full" title={warningV?.message}>
+                            <span className="text-xs font-medium text-amber-600">⚠ Review</span>
+                            {warningV?.message && <span className="text-[10px] text-amber-600/80 leading-tight mt-0.5 whitespace-normal line-clamp-2">{warningV.message}</span>}
+                          </div>
                         ) : rowStatus === 'Passed' ? (
                           <span className="text-xs font-medium text-green-600 font-mono">{passedSuccessLabel}</span>
                         ) : (

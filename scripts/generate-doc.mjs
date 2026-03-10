@@ -465,6 +465,27 @@ const doc = new Document({
       }),
       gap(),
 
+      // ══════════════════════════════════════════════════════════════════════
+      // 10. Change Log
+      // ══════════════════════════════════════════════════════════════════════
+      new Paragraph({ children: [new PageBreak()] }),
+      h1('10. Change Log'),
+      p('One entry per change session. Each row records the user prompt that triggered the change and a one-line summary of what was changed.'),
+      gap(),
+      new Table({
+        width: { size: AVAIL, type: WidthType.DXA },
+        columnWidths: [pct(15), pct(40), pct(45)],
+        rows: [
+          thr('Date', 'Prompt', 'Changes'),
+          tdr(true, '2026-03-09', 'Force logout and redirect to login when Acumatica session expires', 'Added session-expiry detection in Axios interceptor; API returns 401 on expired Acumatica token; frontend forces logout and redirects to /login.'),
+          tdr(true, '2026-03-09', 'Show warning when Run Validation is clicked without an Acumatica session', 'FieldReviewPanel and DocumentDetailPage show a warning banner if no active Acumatica session is detected before validation runs.'),
+          tdr(true, '2026-03-09', 'Add vendor exclusion, vendor-invoice cross-check, CI/CD, post-upload OCR prompt, and change log docs', 'Added vendor exclusion list, cross-check validator, GitHub Actions CI/CD pipeline, auto-OCR prompt after upload, and documentation updates.'),
+          tdr(true, '2026-03-09', 'Change the change log format to record only prompt and changes in 1 line each', 'Section 10 change log added to generate-doc.mjs with a simple 3-column table (Date, Prompt, Changes).'),
+          tdr(true, '2026-03-09', 'Vendor sync page, document grouping by vendor, outstanding balance/aging validation, Docker build', 'Added Vendor entity + migration, vendor sync service (Acumatica → local DB), VendorManagementPage (Manager+), vendor filter + group-by-vendor in DocumentListPage, ErpVendorStatementValidator for outstanding balance and aging (VendorStatement:* ERP keys), auto-links document to vendor after validation, FetchOpenBillsForVendorAsync in AcumaticaClient.'),
+        ],
+      }),
+      gap(),
+
     ],
   }],
 });

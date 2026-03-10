@@ -4,7 +4,7 @@ import { ocrApi, validationApi } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 // validationApi.run is intentionally unused here — Run Validation fires per-field mutations instead.
 import type { ExtractedField, ValidationResult, FieldMappingConfig } from '../types';
-import { CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Pencil, Trash2, RefreshCw, Loader2 } from 'lucide-react';
+import { CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Pencil, Trash2, RefreshCw, Loader2, StopCircle } from 'lucide-react';
 
 interface FieldReviewPanelProps {
   documentId: string;
@@ -138,17 +138,10 @@ export default function FieldReviewPanel({
     },
   });
 
-  // All field IDs — used to fire individual validations in parallel when Run Validation is clicked.
   const allFieldIds = useMemo(() => fields.map(f => f.id), [fields]);
-  const runAllValidations = useCallback(() => {
-    if (!sessionStorage.getItem('acumatica_token')) {
-      logout('session_expired');
-      return;
-    }
-    setSessionError(null);
-    allFieldIds.forEach(id => validateField.mutate(id));
-  }, [allFieldIds, validateField, logout]);
-  const isValidating = allFieldIds.some(id => pendingIds.has(id));
+  // Tracks whether the sequential "Run Validation" loop is running (for button state).
+  const [isRunning, setIsRunning] = useState(false);
+  const stopRequestedRef = useRef(false);
 
   const correctField = useMutation({
     mutationFn: ({ fieldId, value }: { fieldId: string; value: string }) =>
@@ -157,9 +150,11 @@ export default function FieldReviewPanel({
       queryClient.invalidateQueries({ queryKey: ['ocr-result', documentId] });
       const rowIds = fieldToRowRef.current.get(fieldId);
       if (rowIds && rowIds.length > 1) {
-        // Table cell: validate every field in the same row.
-        rowIds.forEach(id => validateField.mutate(id));
-      } else {
+        // Table cell: only re-validate siblings that have ERP mapping configured.
+        // Non-ERP fields have no validator to run and should not show a spinner.
+        const toValidate = rowIds.filter(id => validatableFieldIds.includes(id));
+        toValidate.forEach(id => validateField.mutate(id));
+      } else if (validatableFieldIds.includes(fieldId)) {
         validateField.mutate(fieldId);
       }
     },
@@ -207,6 +202,50 @@ export default function FieldReviewPanel({
     return map;
   }, [fieldConfigs]);
 
+  // Only fields with an ERP mapping key configured need a spinner.
+  const validatableFieldIds = useMemo(() =>
+    fields.filter(f => {
+      const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
+      return cfg?.erpMappingKey && !cfg.isManualEntry;
+    }).map(f => f.id),
+  [fields, fieldConfigMap]);
+
+  // Sequential one-by-one validation: validates each ERP-mapped field in DisplayOrder.
+  // Each field's spinner appears/disappears individually via validateField's onMutate/onSettled.
+  // Running sequentially ensures vendor saves to DB before invoice/amount reads it via
+  // PrePopulateVendorContextAsync.
+  const runAllValidations = useCallback(async () => {
+    if (!sessionStorage.getItem('acumatica_token')) {
+      logout('session_expired');
+      return;
+    }
+    setSessionError(null);
+    stopRequestedRef.current = false;
+    setIsRunning(true);
+    const sorted = fields
+      .filter(f => {
+        const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
+        return cfg?.erpMappingKey && !cfg.isManualEntry;
+      })
+      .sort((a, b) =>
+        (fieldConfigMap[a.fieldName.toLowerCase()]?.displayOrder ?? 999) -
+        (fieldConfigMap[b.fieldName.toLowerCase()]?.displayOrder ?? 999)
+      );
+    for (const field of sorted) {
+      if (stopRequestedRef.current) break;
+      try { await validateField.mutateAsync(field.id); } catch { /* onError handles 424 */ }
+    }
+    if (!stopRequestedRef.current) setIsRunning(false);
+  }, [fields, fieldConfigMap, validateField, logout]);
+
+  const stopValidation = useCallback(() => {
+    stopRequestedRef.current = true;
+    setIsRunning(false);
+    setPendingIds(new Set());
+  }, []);
+
+  const isValidating = isRunning || allFieldIds.some(id => pendingIds.has(id));
+
   const isTableField = useCallback((fieldName: string) => {
     const cfg = fieldConfigMap[fieldName.toLowerCase()];
     if (cfg) return cfg.allowMultiple;
@@ -236,6 +275,29 @@ export default function FieldReviewPanel({
   const tableRowCount = useMemo(() =>
     Math.max(...Object.values(tableFieldGroups).map(g => g.length), 0),
   [tableFieldGroups]);
+
+  // Compute which table-row field IDs belong to "settled" rows (any isCheckbox
+  // column in that row has correctedValue / normalizedValue === "true").
+  const settledFieldIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (let i = 0; i < tableRowCount; i++) {
+      const rowIsSettled = tableColumnNames.some(name => {
+        const cfg = fieldConfigMap[name.toLowerCase()];
+        if (!cfg?.isCheckbox) return false;
+        const f = tableFieldGroups[name]?.[i];
+        if (!f) return false;
+        const val = f.isManuallyCorreected ? f.correctedValue : (f.normalizedValue ?? f.rawValue);
+        return val === 'true';
+      });
+      if (rowIsSettled) {
+        tableColumnNames.forEach(name => {
+          const f = tableFieldGroups[name]?.[i];
+          if (f?.id) ids.add(f.id);
+        });
+      }
+    }
+    return ids;
+  }, [tableColumnNames, tableFieldGroups, tableRowCount, fieldConfigMap]);
 
   // Keep fieldToRowRef current so correctField.onSuccess can find sibling IDs.
   useEffect(() => {
@@ -295,15 +357,25 @@ export default function FieldReviewPanel({
               {showSummary ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
             </div>
           </button>
-          <button
-            onClick={runAllValidations}
-            disabled={isValidating}
-            title="Run full validation"
-            className="flex items-center gap-1 px-3 py-3 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors border-l border-border"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${isValidating ? 'animate-spin' : ''}`} />
-            {isValidating ? 'Validating…' : 'Run Validation'}
-          </button>
+          {isValidating ? (
+            <button
+              onClick={stopValidation}
+              title="Stop validation"
+              className="flex items-center gap-1 px-3 py-3 text-xs text-destructive hover:bg-destructive/10 transition-colors border-l border-border"
+            >
+              <StopCircle className="h-3.5 w-3.5" />
+              Stop
+            </button>
+          ) : (
+            <button
+              onClick={runAllValidations}
+              title="Run full validation"
+              className="flex items-center gap-1 px-3 py-3 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors border-l border-border"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Run Validation
+            </button>
+          )}
         </div>
       </div>
 
@@ -343,16 +415,19 @@ export default function FieldReviewPanel({
                 </div>
                 <div className="divide-y divide-border">
                   {headerFields.map(field => {
-                    const label = fieldConfigMap[field.fieldName.toLowerCase()]?.displayLabel ?? field.fieldName;
+                    const cfg = fieldConfigMap[field.fieldName.toLowerCase()];
+                    const label = cfg?.displayLabel ?? field.fieldName;
+                    const isManual = cfg?.isManualEntry ?? false;
                     const status = getValidationStatus(field.id);
                     const isPending = pendingIds.has(field.id);
-                    const isLow = (field.confidence ?? 1) < 0.7;
+                    const isLow = !isManual && (field.confidence ?? 1) < 0.7;
                     const isSelected = selectedFieldId === field.id;
                     return (
                       <div
                         key={field.id}
                         className={`px-4 py-2.5 cursor-pointer transition-colors border-l-2 ${
                           isSelected       ? 'bg-primary/10 border-l-primary'
+                          : isManual       ? 'bg-violet-50/50 border-l-violet-400'
                           : isPending      ? 'bg-blue-50/40 border-l-blue-300'
                           : status === 'Failed'  ? 'bg-red-50 border-l-red-400'
                           : status === 'Warning' ? 'bg-amber-50 border-l-amber-400'
@@ -364,36 +439,50 @@ export default function FieldReviewPanel({
                       >
                         <div className="flex items-center gap-1.5 mb-1">
                           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex-1">{label}</span>
-                          {isPending        && <Loader2       className="h-3 w-3 text-blue-500 animate-spin" />}
-                          {!isPending && status === 'Failed'  && <XCircle       className="h-3 w-3 text-red-500" />}
-                          {!isPending && status === 'Warning' && <AlertTriangle  className="h-3 w-3 text-amber-500" />}
-                          {!isPending && status === 'Passed'  && <CheckCircle    className="h-3 w-3 text-green-500" />}
-                          <ConfBadge value={field.confidence ?? 0} />
+                          {isManual && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 font-medium">Manual</span>}
+                          {!isManual && isPending        && <Loader2       className="h-3 w-3 text-blue-500 animate-spin" />}
+                          {!isManual && !isPending && status === 'Failed'  && <XCircle       className="h-3 w-3 text-red-500" />}
+                          {!isManual && !isPending && status === 'Warning' && <AlertTriangle  className="h-3 w-3 text-amber-500" />}
+                          {!isManual && !isPending && status === 'Passed'  && <CheckCircle    className="h-3 w-3 text-green-500" />}
+                          {!isManual && <ConfBadge value={field.confidence ?? 0} />}
                         </div>
                         <div onClick={e => e.stopPropagation()}>
                           <InlineEditCell field={field} onSave={save} />
                         </div>
+                        {isManual && !field.correctedValue && !field.normalizedValue && !field.rawValue && (
+                          <p className="text-[10px] text-violet-500 mt-0.5 italic">Enter value manually above</p>
+                        )}
                         {allValidations.filter(v => v.extractedFieldId === field.id && v.message).map(v => {
-                          const label = v.status === 'Passed' ? '✓ In ERP'
-                            : v.status === 'Warning' ? '⚠ Review'
-                            : '✗ Not found';
+                          const isMismatch = v.message?.toLowerCase().includes('mismatch');
+                          const erpPassValue = v.status === 'Passed' && v.erpResponseField
+                            ? getErpValue(v.erpReference, v.erpResponseField)
+                            : undefined;
+                          const badgeLabel = v.status === 'Passed'
+                            ? (erpPassValue ? `✓ ${v.erpResponseField}: ${erpPassValue}` : '✓ In ERP')
+                            : v.status === 'Warning'
+                              ? (isMismatch ? '⚠ Value mismatch' : v.message?.toLowerCase().includes('not found') ? '⚠ Not found in ERP' : '⚠ Review')
+                            : '✗ Not found in ERP';
+                          const erpSuggestion = (v.status === 'Warning' || v.status === 'Failed') && v.erpResponseField
+                            ? getErpValue(v.erpReference, v.erpResponseField)
+                            : undefined;
                           return (
                             <div key={v.id} className="mt-0.5 space-y-0.5">
-                              <span
-                                className={`text-xs px-1.5 py-0.5 rounded font-medium font-mono ${
-                                  v.status === 'Passed' ? 'bg-green-100 text-green-700'
-                                  : v.status === 'Warning' ? 'bg-amber-100 text-amber-700'
-                                  : 'bg-red-100 text-red-700'
-                                }`}
-                              >
-                                {label}
-                              </span>
+                              <span className={`text-xs px-1.5 py-0.5 rounded font-medium font-mono ${
+                                v.status === 'Passed' ? 'bg-green-100 text-green-700'
+                                : v.status === 'Warning' ? 'bg-amber-100 text-amber-700'
+                                : 'bg-red-100 text-red-700'
+                              }`}>{badgeLabel}</span>
                               {v.message && (
                                 <p className={`text-xs leading-tight ${
                                   v.status === 'Passed' ? 'text-green-600'
                                   : v.status === 'Warning' ? 'text-amber-600'
                                   : 'text-red-600'
                                 }`}>{v.message}</p>
+                              )}
+                              {erpSuggestion && (
+                                <p className="text-xs text-blue-600 leading-tight">
+                                  → Correct value in ERP: <span className="font-mono font-medium">{erpSuggestion}</span>
+                                </p>
                               )}
                             </div>
                           );
@@ -413,16 +502,19 @@ export default function FieldReviewPanel({
                     Table Data <span className="font-normal text-purple-500">({tableRowCount} rows)</span>
                   </p>
                 </div>
-                <div className="overflow-x-auto">
+                <div>
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-border bg-muted/30">
                         <th className="text-center px-2 py-2 font-medium text-muted-foreground text-xs">#</th>
-                        {tableColumnNames.map(name => (
-                          <th key={name} className="text-left px-2 py-2 font-medium text-muted-foreground text-xs whitespace-nowrap">
-                            {fieldConfigMap[name.toLowerCase()]?.displayLabel ?? name}
-                          </th>
-                        ))}
+                        {tableColumnNames.map(name => {
+                          const isCheckboxCol = fieldConfigMap[name.toLowerCase()]?.isCheckbox ?? false;
+                          return (
+                            <th key={name} className={`${isCheckboxCol ? 'text-center' : 'text-left'} px-2 py-2 font-medium text-muted-foreground text-xs whitespace-nowrap`}>
+                              {fieldConfigMap[name.toLowerCase()]?.displayLabel ?? name}
+                            </th>
+                          );
+                        })}
                         <th className="px-2 py-2 text-muted-foreground text-xs">Valid.</th>
                         <th className="px-2 py-2"></th>
                       </tr>
@@ -452,15 +544,40 @@ export default function FieldReviewPanel({
                           ? getErpValue(passedV.erpReference, passedV.erpResponseField)
                           : undefined;
                         const passedSuccessLabel = passedValue ? `✓ ${passedV!.erpResponseField}: ${passedValue}` : '✓';
+                        const isSettled = rowFieldIds.some(id => settledFieldIds.has(id));
                         return (
                           <tr
                             key={i}
-                            className={`hover:bg-muted/30 cursor-pointer ${avgConf < 0.7 ? 'bg-red-50/50' : ''}`}
+                            className={`hover:bg-muted/30 cursor-pointer transition-opacity ${isSettled ? 'opacity-50' : ''} ${avgConf < 0.7 && !isSettled ? 'bg-red-50/50' : ''}`}
                             onClick={() => firstField && onFieldSelect?.(selectedFieldId === firstField.id ? null : firstField)}
                           >
                             <td className="px-2 py-2 text-center text-muted-foreground text-xs">{i + 1}</td>
                             {tableColumnNames.map(name => {
                               const cellField = tableFieldGroups[name]?.[i];
+                              const cellCfg = fieldConfigMap[name.toLowerCase()];
+                              const isManualCol = cellCfg?.isCheckbox ?? false;
+
+                              // Render a checkbox toggle for isCheckbox columns
+                              if (isManualCol) {
+                                const rawVal = cellField
+                                  ? (cellField.isManuallyCorreected ? cellField.correctedValue : (cellField.normalizedValue ?? cellField.rawValue))
+                                  : undefined;
+                                const checked = rawVal === 'true';
+                                return (
+                                  <td key={name} className="px-2 py-2 text-center" onClick={e => e.stopPropagation()}>
+                                    {cellField ? (
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={e => save(cellField.id, e.target.checked ? 'true' : 'false')}
+                                        className="h-4 w-4 rounded border-gray-300 accent-violet-600 cursor-pointer"
+                                        title={cellCfg?.displayLabel ?? name}
+                                      />
+                                    ) : <span className="text-muted-foreground">—</span>}
+                                  </td>
+                                );
+                              }
+
                               const cellStatus = cellField ? getValidationStatus(cellField.id) : null;
                               const cellPending = cellField ? pendingIds.has(cellField.id) : false;
                               return (
@@ -483,14 +600,38 @@ export default function FieldReviewPanel({
                             })}
                             {/* Valid. column */}
                             <td className="px-2 py-2 text-center whitespace-nowrap">
-                              {rowIsPending ? (
+                              {isSettled ? (
+                                <span className="text-xs font-medium text-violet-600 px-1.5 py-0.5 bg-violet-50 rounded">Settled</span>
+                              ) : rowIsPending ? (
                                 <span className="inline-flex items-center gap-1 text-xs text-blue-500">
                                   <Loader2 className="h-3 w-3 animate-spin" /> Checking
                                 </span>
                               ) : rowStatus === 'Failed' ? (
-                                <span className="text-xs font-medium text-red-600">✗ Not found</span>
+                                <div className="space-y-0.5">
+                                  <span className="text-xs font-medium text-red-600 block">✗ Not found</span>
+                                  {rowValidations.filter(v => v.status === 'Failed' && v.message).map((v, i) => (
+                                    <p key={i} className="text-xs text-red-500 leading-tight">{v.message}</p>
+                                  ))}
+                                </div>
                               ) : rowStatus === 'Warning' ? (
-                                <span className="text-xs font-medium text-amber-600">⚠ Review</span>
+                                <div className="space-y-0.5">
+                                  <span className="text-xs font-medium text-amber-600 block">⚠ Review</span>
+                                  {rowValidations.filter(v => v.status === 'Warning' && v.message).map((v, i) => {
+                                    const erpSuggestion = v.erpResponseField
+                                      ? getErpValue(v.erpReference, v.erpResponseField)
+                                      : undefined;
+                                    return (
+                                      <div key={i}>
+                                        <p className="text-xs text-amber-600 leading-tight">{v.message}</p>
+                                        {erpSuggestion && (
+                                          <p className="text-xs text-blue-600 leading-tight">
+                                            → ERP: <span className="font-mono font-medium">{erpSuggestion}</span>
+                                          </p>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
                               ) : rowStatus === 'Passed' ? (
                                 <span className="text-xs font-medium text-green-600 font-mono">{passedSuccessLabel}</span>
                               ) : (

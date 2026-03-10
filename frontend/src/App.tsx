@@ -15,6 +15,8 @@ import UserManagementPage from './pages/admin/UserManagementPage';
 import FieldMappingConfigPage from './pages/admin/FieldMappingConfigPage';
 import AuditLogPage from './pages/admin/AuditLogPage';
 import AcumaticaTestPage from './pages/admin/AcumaticaTestPage';
+import VendorManagementPage from './pages/admin/VendorManagementPage';
+import RubbishBinPage from './pages/admin/RubbishBinPage';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,8 +49,10 @@ export default function App() {
 
                 {/* Admin / Manager only */}
                 <Route element={<ProtectedRoute requireManager />}>
+                  <Route path="/admin/vendors" element={<VendorManagementPage />} />
                   <Route path="/admin/users" element={<UserManagementPage />} />
                   <Route path="/admin/audit" element={<AuditLogPage />} />
+                  <Route path="/admin/rubbish-bin" element={<RubbishBinPage />} />
                 </Route>
                 <Route element={<ProtectedRoute requireAdmin />}>
                   <Route path="/admin/config" element={<FieldMappingConfigPage />} />
