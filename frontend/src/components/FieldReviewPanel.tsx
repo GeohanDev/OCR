@@ -210,10 +210,10 @@ export default function FieldReviewPanel({
     }).map(f => f.id),
   [fields, fieldConfigMap]);
 
-  // Sequential one-by-one validation: validates each ERP-mapped field in DisplayOrder.
-  // Each field's spinner appears/disappears individually via validateField's onMutate/onSettled.
-  // Running sequentially ensures vendor saves to DB before invoice/amount reads it via
-  // PrePopulateVendorContextAsync.
+  // Sequential validation with dependency-chain support:
+  // - Header fields run one-by-one; if a field fails, dependents are skipped.
+  // - Table rows run column-by-column with per-row AND global failure tracking.
+  // Ensures vendor is validated before line items, and invoice ref before amount/balance.
   const runAllValidations = useCallback(async () => {
     if (!sessionStorage.getItem('acumatica_token')) {
       logout('session_expired');
@@ -222,19 +222,64 @@ export default function FieldReviewPanel({
     setSessionError(null);
     stopRequestedRef.current = false;
     setIsRunning(true);
-    const sorted = fields
-      .filter(f => {
-        const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
-        return cfg?.erpMappingKey && !cfg.isManualEntry;
-      })
+
+    const validatable = fields.filter(f => {
+      const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
+      return cfg?.erpMappingKey && !cfg.isManualEntry && !cfg.isCheckbox;
+    });
+
+    const checkIsTableField = (name: string) => {
+      const cfg = fieldConfigMap[name.toLowerCase()];
+      if (cfg) return cfg.allowMultiple;
+      return fields.filter(f => f.fieldName === name).length > 1;
+    };
+
+    const headerFieldsToRun = validatable
+      .filter(f => !checkIsTableField(f.fieldName))
       .sort((a, b) =>
         (fieldConfigMap[a.fieldName.toLowerCase()]?.displayOrder ?? 999) -
-        (fieldConfigMap[b.fieldName.toLowerCase()]?.displayOrder ?? 999)
-      );
-    for (const field of sorted) {
+        (fieldConfigMap[b.fieldName.toLowerCase()]?.displayOrder ?? 999));
+    const tableFields = validatable.filter(f => checkIsTableField(f.fieldName));
+
+    const failedFieldNames = new Set<string>();
+
+    for (const f of headerFieldsToRun) {
       if (stopRequestedRef.current) break;
-      try { await validateField.mutateAsync(field.id); } catch { /* onError handles 424 */ }
+      const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
+      if (cfg?.dependentFieldKey && failedFieldNames.has(cfg.dependentFieldKey.toLowerCase())) continue;
+      try {
+        const results = await validateField.mutateAsync(f.id);
+        if (results.some((r: ValidationResult) => r.status === 'Failed'))
+          failedFieldNames.add(f.fieldName.toLowerCase());
+      } catch { /* onError handles 424 */ }
     }
+
+    const colNames = [...new Set(tableFields.map(f => f.fieldName))];
+    const groupedCols: Record<string, ExtractedField[]> = {};
+    for (const name of colNames) groupedCols[name] = fields.filter(f => f.fieldName === name);
+    const maxRows = colNames.length > 0 ? Math.max(...Object.values(groupedCols).map(g => g.length), 0) : 0;
+
+    for (let i = 0; i < maxRows; i++) {
+      if (stopRequestedRef.current) break;
+      const failedRowFieldNames = new Set<string>();
+      const sortedCols = [...colNames].sort((a, b) =>
+        (fieldConfigMap[a.toLowerCase()]?.displayOrder ?? 999) -
+        (fieldConfigMap[b.toLowerCase()]?.displayOrder ?? 999));
+      for (const name of sortedCols) {
+        if (stopRequestedRef.current) break;
+        const f = groupedCols[name]?.[i];
+        if (!f || !fieldConfigMap[name.toLowerCase()]?.erpMappingKey) continue;
+        const cfg = fieldConfigMap[name.toLowerCase()];
+        const depKey = cfg?.dependentFieldKey?.toLowerCase();
+        if (depKey && (failedFieldNames.has(depKey) || failedRowFieldNames.has(depKey))) continue;
+        try {
+          const results = await validateField.mutateAsync(f.id);
+          if (results.some((r: ValidationResult) => r.status === 'Failed'))
+            failedRowFieldNames.add(name.toLowerCase());
+        } catch { /* onError handles 424 */ }
+      }
+    }
+
     if (!stopRequestedRef.current) setIsRunning(false);
   }, [fields, fieldConfigMap, validateField, logout]);
 

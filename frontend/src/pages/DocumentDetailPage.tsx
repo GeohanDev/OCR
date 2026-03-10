@@ -235,6 +235,8 @@ export default function DocumentDetailPage() {
   const [isRunning, setIsRunning] = useState(false);
   // Set to true when the user clicks Stop — checked at each loop iteration.
   const stopRequestedRef = useRef(false);
+  // Set to true when OCR finishes — triggers auto-validation once fresh fields arrive.
+  const shouldAutoValidateRef = useRef(false);
 
   const validateField = useMutation({
     mutationFn: (fieldId: string) =>
@@ -307,45 +309,72 @@ export default function DocumentDetailPage() {
       .map(f => f.id),
   [ocrResult?.fields, fieldConfigMap]);
 
-  // Groups header fields to validate simultaneously, then table rows sequentially row-by-row.
+  // Groups header fields sequentially (so dependency failures can short-circuit dependents),
+  // then table rows sequentially row-by-row with the same dependency skip logic.
   const runSequential = useCallback(async (fields: ExtractedField[]) => {
     const validatable = fields.filter(f => {
       const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
-      return cfg?.erpMappingKey && !cfg.isManualEntry;
+      return cfg?.erpMappingKey && !cfg.isManualEntry && !cfg.isCheckbox;
     });
 
-    // Provide a helper to check if a fieldName is a table field (re-implemented to avoid hook dependency cycle)
     const checkIsTableField = (name: string) => {
       const cfg = fieldConfigMap[name.toLowerCase()];
       if (cfg) return cfg.allowMultiple;
       return (fields.filter(f => f.fieldName === name).length) > 1;
     };
 
-    const headerFieldsToRun = validatable.filter(f => !checkIsTableField(f.fieldName));
+    const headerFieldsToRun = validatable
+      .filter(f => !checkIsTableField(f.fieldName))
+      .sort((a, b) =>
+        (fieldConfigMap[a.fieldName.toLowerCase()]?.displayOrder ?? 999) -
+        (fieldConfigMap[b.fieldName.toLowerCase()]?.displayOrder ?? 999));
     const tableFields = validatable.filter(f => checkIsTableField(f.fieldName));
 
-    // 1. Run all header fields simultaneously
-    if (headerFieldsToRun.length > 0 && !stopRequestedRef.current) {
-      await Promise.allSettled(headerFieldsToRun.map(f => validateField.mutateAsync(f.id)));
+    // Track which field NAMES failed — used to skip dependents.
+    const failedFieldNames = new Set<string>();
+
+    // 1. Run header fields one-by-one so we can skip dependents whose parent failed.
+    for (const f of headerFieldsToRun) {
+      if (stopRequestedRef.current) break;
+      const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
+      // Skip if this field's dependency already failed.
+      if (cfg?.dependentFieldKey && failedFieldNames.has(cfg.dependentFieldKey.toLowerCase())) continue;
+      try {
+        const results = await validateField.mutateAsync(f.id);
+        if (results.some((r: ValidationResult) => r.status === 'Failed'))
+          failedFieldNames.add(f.fieldName.toLowerCase());
+      } catch { /* onError handles 424 */ }
     }
 
-    // 2. Group table fields by row index and run row-by-row
-    // Find unique column names in tableFields
+    // 2. Group table fields by column name and run row-by-row.
     const colNames = [...new Set(tableFields.map(f => f.fieldName))];
     const groupedCols: Record<string, ExtractedField[]> = {};
-    for (const name of colNames) {
-      groupedCols[name] = fields.filter(f => f.fieldName === name);
-    }
+    for (const name of colNames) groupedCols[name] = fields.filter(f => f.fieldName === name);
     const maxRows = Math.max(...Object.values(groupedCols).map(g => g.length), 0);
 
     for (let i = 0; i < maxRows; i++) {
       if (stopRequestedRef.current) break;
-      const rowFields = colNames
-        .map(name => groupedCols[name]?.[i])
-        .filter((f): f is ExtractedField => !!f && fieldConfigMap[f.fieldName.toLowerCase()]?.erpMappingKey != null);
-      if (rowFields.length > 0) {
-        // Run cells in the same row simultaneously
-        await Promise.allSettled(rowFields.map(f => validateField.mutateAsync(f.id)));
+      // Track IDs that failed within this row to skip intra-row dependents.
+      const failedRowFieldNames = new Set<string>();
+
+      // Sort columns by displayOrder so dependency order is respected within each row.
+      const sortedCols = [...colNames].sort((a, b) =>
+        (fieldConfigMap[a.toLowerCase()]?.displayOrder ?? 999) -
+        (fieldConfigMap[b.toLowerCase()]?.displayOrder ?? 999));
+
+      for (const name of sortedCols) {
+        if (stopRequestedRef.current) break;
+        const f = groupedCols[name]?.[i];
+        if (!f || !fieldConfigMap[name.toLowerCase()]?.erpMappingKey) continue;
+        const cfg = fieldConfigMap[name.toLowerCase()];
+        const depKey = cfg?.dependentFieldKey?.toLowerCase();
+        // Skip if global dependency (e.g. vendorName) or row-level dependency failed.
+        if (depKey && (failedFieldNames.has(depKey) || failedRowFieldNames.has(depKey))) continue;
+        try {
+          const results = await validateField.mutateAsync(f.id);
+          if (results.some((r: ValidationResult) => r.status === 'Failed'))
+            failedRowFieldNames.add(name.toLowerCase());
+        } catch { /* onError handles 424 */ }
       }
     }
   }, [fieldConfigMap, validateField, stopRequestedRef]);
@@ -372,17 +401,28 @@ export default function DocumentDetailPage() {
 
   const isValidating = isRunning || allFieldIds.some(id => pendingIds.has(id));
 
-  // Auto-run validation when OCR completes (Processing → PendingReview).
+  // Phase 1: Detect Processing → PendingReview, clear stale data, invalidate ocr-result.
   useEffect(() => {
     if (prevStatusRef.current === 'Processing' && doc?.status === 'PendingReview') {
       queryClient.setQueryData(['validation', id], []);
-      stopRequestedRef.current = false;
-      setIsRunning(true);
-      runSequential(ocrResult?.fields ?? []).finally(() => { if (!stopRequestedRef.current) setIsRunning(false); });
+      shouldAutoValidateRef.current = true;
+      queryClient.invalidateQueries({ queryKey: ['ocr-result', id] });
     }
     prevStatusRef.current = doc?.status;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.status]);
+
+  // Phase 2: Once fresh fields arrive (after invalidation), trigger auto-validation.
+  useEffect(() => {
+    if (!shouldAutoValidateRef.current) return;
+    const freshFields = ocrResult?.fields ?? [];
+    if (freshFields.length === 0) return;
+    shouldAutoValidateRef.current = false;
+    stopRequestedRef.current = false;
+    setIsRunning(true);
+    runSequential(freshFields).finally(() => { if (!stopRequestedRef.current) setIsRunning(false); });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ocrResult?.fields]);
 
   const isTableField = useCallback((fieldName: string) => {
     const cfg = fieldConfigMap[fieldName.toLowerCase()];
@@ -417,6 +457,28 @@ export default function DocumentDetailPage() {
   const tableRowCount = useMemo(() =>
     Math.max(...Object.values(tableFieldGroups).map(g => g.length), 0),
   [tableFieldGroups]);
+
+  // Which table-row field IDs belong to "settled" rows (any isCheckbox column is "true").
+  const settledFieldIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (let i = 0; i < tableRowCount; i++) {
+      const rowIsSettled = tableColumnNames.some(name => {
+        const cfg = fieldConfigMap[name.toLowerCase()];
+        if (!cfg?.isCheckbox) return false;
+        const f = tableFieldGroups[name]?.[i];
+        if (!f) return false;
+        const val = f.isManuallyCorreected ? f.correctedValue : (f.normalizedValue ?? f.rawValue);
+        return val === 'true';
+      });
+      if (rowIsSettled) {
+        tableColumnNames.forEach(name => {
+          const f = tableFieldGroups[name]?.[i];
+          if (f?.id) ids.add(f.id);
+        });
+      }
+    }
+    return ids;
+  }, [tableColumnNames, tableFieldGroups, tableRowCount, fieldConfigMap]);
 
   if (isLoading) return <div className="text-center py-12 text-muted-foreground">Loading...</div>;
   if (!doc) return <div className="text-center py-12 text-destructive">Document not found.</div>;
@@ -1031,11 +1093,14 @@ export default function DocumentDetailPage() {
               <thead>
                 <tr className="border-b border-border bg-muted/50">
                   <th className="text-center px-3 py-2 font-medium text-muted-foreground">#</th>
-                  {tableColumnNames.map(name => (
-                    <th key={name} className="text-left px-3 py-2 font-medium text-muted-foreground whitespace-nowrap">
-                      {fieldConfigMap[name.toLowerCase()]?.displayLabel ?? name}
-                    </th>
-                  ))}
+                  {tableColumnNames.map(name => {
+                    const isCheckboxCol = fieldConfigMap[name.toLowerCase()]?.isCheckbox ?? false;
+                    return (
+                      <th key={name} className={`${isCheckboxCol ? 'text-center' : 'text-left'} px-3 py-2 font-medium text-muted-foreground whitespace-nowrap`}>
+                        {fieldConfigMap[name.toLowerCase()]?.displayLabel ?? name}
+                      </th>
+                    );
+                  })}
                   <th className="text-center px-3 py-2 font-medium text-muted-foreground">Valid.</th>
                 </tr>
               </thead>
@@ -1063,14 +1128,38 @@ export default function DocumentDetailPage() {
                     : undefined;
                   const passedSuccessLabel = passedValue ? `✓ ${passedV!.erpResponseField}: ${passedValue}` : '✓';
                   const warningV = rowValidations.find(v => v.status === 'Warning');
+                  const isSettled = rowFieldIds.some(id => settledFieldIds.has(id));
                   return (
-                    <tr key={i} className={`hover:bg-muted/30 ${avgConf < 0.7 ? 'bg-red-50/50' : ''}`}>
+                    <tr key={i} className={`hover:bg-muted/30 transition-opacity ${isSettled ? 'opacity-50' : ''} ${avgConf < 0.7 && !isSettled ? 'bg-red-50/50' : ''}`}>
                       <td className="px-3 py-2 text-center text-muted-foreground">{i + 1}</td>
                       {tableColumnNames.map(name => {
                         const cellField = tableFieldGroups[name]?.[i];
+                        const cellCfg = fieldConfigMap[name.toLowerCase()];
+                        const isCheckboxCol = cellCfg?.isCheckbox ?? false;
+
+                        if (isCheckboxCol) {
+                          const rawVal = cellField
+                            ? (cellField.isManuallyCorreected ? cellField.correctedValue : (cellField.normalizedValue ?? cellField.rawValue))
+                            : undefined;
+                          const checked = rawVal === 'true';
+                          return (
+                            <td key={name} className="px-3 py-2 text-center">
+                              {cellField ? (
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={e => save(cellField.id, e.target.checked ? 'true' : 'false')}
+                                  className="h-4 w-4 rounded border-gray-300 accent-violet-600 cursor-pointer"
+                                  title={cellCfg?.displayLabel ?? name}
+                                />
+                              ) : <span className="text-muted-foreground">—</span>}
+                            </td>
+                          );
+                        }
+
                         const cellStatus = cellField ? getValidationStatus(cellField.id) : null;
                         const cellPending = cellField ? pendingIds.has(cellField.id) : false;
-                         return (
+                        return (
                           <td
                             key={name}
                             className={`px-3 py-2 transition-colors ${
@@ -1087,7 +1176,9 @@ export default function DocumentDetailPage() {
                       })}
                       {/* Valid. column */}
                       <td className="px-3 py-2 text-center whitespace-nowrap">
-                        {rowIsPending ? (
+                        {isSettled ? (
+                          <span className="text-xs font-medium text-violet-600 px-1.5 py-0.5 bg-violet-50 rounded">Settled</span>
+                        ) : rowIsPending ? (
                           <span className="inline-flex items-center gap-1 text-xs text-blue-500">
                             <Loader2 className="h-3 w-3 animate-spin" /> Checking
                           </span>
