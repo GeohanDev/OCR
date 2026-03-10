@@ -235,8 +235,6 @@ export default function DocumentDetailPage() {
   const [isRunning, setIsRunning] = useState(false);
   // Set to true when the user clicks Stop — checked at each loop iteration.
   const stopRequestedRef = useRef(false);
-  // Set to true when OCR finishes — triggers auto-validation once fresh fields arrive.
-  const shouldAutoValidateRef = useRef(false);
 
   const validateField = useMutation({
     mutationFn: (fieldId: string) =>
@@ -401,28 +399,26 @@ export default function DocumentDetailPage() {
 
   const isValidating = isRunning || allFieldIds.some(id => pendingIds.has(id));
 
-  // Phase 1: Detect Processing → PendingReview, clear stale data, invalidate ocr-result.
+  // Auto-run validation when OCR completes (Processing → PendingReview).
+  // setIsRunning(true) fires BEFORE the async fetch so the UI enters validating mode immediately.
+  // fetchQuery explicitly fetches fresh OCR fields — avoids relying on stale cache or
+  // reference-equality tricks that can cause Phase 2 effects to silently skip.
   useEffect(() => {
     if (prevStatusRef.current === 'Processing' && doc?.status === 'PendingReview') {
       queryClient.setQueryData(['validation', id], []);
-      shouldAutoValidateRef.current = true;
-      queryClient.invalidateQueries({ queryKey: ['ocr-result', id] });
+      stopRequestedRef.current = false;
+      setIsRunning(true);
+      queryClient
+        .fetchQuery({ queryKey: ['ocr-result', id], queryFn: () => ocrApi.getResult(id!).then(r => r.data) })
+        .then((freshResult: unknown) => {
+          const fields = (freshResult as OcrResult | null)?.fields ?? [];
+          if (!stopRequestedRef.current) return runSequential(fields);
+        })
+        .finally(() => { if (!stopRequestedRef.current) setIsRunning(false); });
     }
     prevStatusRef.current = doc?.status;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.status]);
-
-  // Phase 2: Once fresh fields arrive (after invalidation), trigger auto-validation.
-  useEffect(() => {
-    if (!shouldAutoValidateRef.current) return;
-    const freshFields = ocrResult?.fields ?? [];
-    if (freshFields.length === 0) return;
-    shouldAutoValidateRef.current = false;
-    stopRequestedRef.current = false;
-    setIsRunning(true);
-    runSequential(freshFields).finally(() => { if (!stopRequestedRef.current) setIsRunning(false); });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ocrResult?.fields]);
 
   const isTableField = useCallback((fieldName: string) => {
     const cfg = fieldConfigMap[fieldName.toLowerCase()];

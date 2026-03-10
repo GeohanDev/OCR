@@ -652,31 +652,22 @@ export default function FieldReviewPanel({
                                   <Loader2 className="h-3 w-3 animate-spin" /> Checking
                                 </span>
                               ) : rowStatus === 'Failed' ? (
-                                <div className="space-y-0.5">
-                                  <span className="text-xs font-medium text-red-600 block">✗ Not found</span>
-                                  {rowValidations.filter(v => v.status === 'Failed' && v.message).map((v, i) => (
-                                    <p key={i} className="text-xs text-red-500 leading-tight">{v.message}</p>
-                                  ))}
-                                </div>
+                                <span
+                                  className="text-xs font-medium text-red-600"
+                                  title={rowValidations.filter(v => v.status === 'Failed' && v.message).map(v => v.message).join('\n') || undefined}
+                                >
+                                  ✗ Not found
+                                </span>
                               ) : rowStatus === 'Warning' ? (
-                                <div className="space-y-0.5">
-                                  <span className="text-xs font-medium text-amber-600 block">⚠ Review</span>
-                                  {rowValidations.filter(v => v.status === 'Warning' && v.message).map((v, i) => {
-                                    const erpSuggestion = v.erpResponseField
-                                      ? getErpValue(v.erpReference, v.erpResponseField)
-                                      : undefined;
-                                    return (
-                                      <div key={i}>
-                                        <p className="text-xs text-amber-600 leading-tight">{v.message}</p>
-                                        {erpSuggestion && (
-                                          <p className="text-xs text-blue-600 leading-tight">
-                                            → ERP: <span className="font-mono font-medium">{erpSuggestion}</span>
-                                          </p>
-                                        )}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
+                                <span
+                                  className="text-xs font-medium text-amber-600"
+                                  title={rowValidations.filter(v => v.status === 'Warning' && v.message).map(v => {
+                                    const sug = v.erpResponseField ? getErpValue(v.erpReference, v.erpResponseField) : undefined;
+                                    return sug ? `${v.message} → ERP: ${sug}` : v.message;
+                                  }).join('\n') || undefined}
+                                >
+                                  ⚠ Review
+                                </span>
                               ) : rowStatus === 'Passed' ? (
                                 <span className="text-xs font-medium text-green-600 font-mono">{passedSuccessLabel}</span>
                               ) : (
