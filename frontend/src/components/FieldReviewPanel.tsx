@@ -497,7 +497,7 @@ export default function FieldReviewPanel({
                         {isManual && !field.correctedValue && !field.normalizedValue && !field.rawValue && (
                           <p className="text-[10px] text-violet-500 mt-0.5 italic">Enter value manually above</p>
                         )}
-                        {allValidations.filter(v => v.extractedFieldId === field.id && v.message).map(v => {
+                        {allValidations.filter(v => v.extractedFieldId === field.id && v.message && v.status === status).map(v => {
                           const isMismatch = v.message?.toLowerCase().includes('mismatch');
                           const erpPassValue = v.status === 'Passed' && v.erpResponseField
                             ? getErpValue(v.erpReference, v.erpResponseField)

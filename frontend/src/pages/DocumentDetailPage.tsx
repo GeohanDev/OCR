@@ -1033,7 +1033,7 @@ export default function DocumentDetailPage() {
                   {isManual && !field.correctedValue && !field.normalizedValue && !field.rawValue && (
                     <p className="text-[10px] text-violet-500 italic mt-0.5">Enter this value manually</p>
                   )}
-                  {msgs.map(v => {
+                  {msgs.filter(v => v.status === status).map(v => {
                     const erpPassValue = v.status === 'Passed' && v.erpResponseField
                       ? getErpValue(v.erpReference, v.erpResponseField)
                       : undefined;
