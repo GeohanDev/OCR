@@ -23,13 +23,18 @@ public class OcrController : ControllerBase
     }
 
     [HttpPost("{documentId:guid}/process")]
-    public async Task<IActionResult> Process(Guid documentId, CancellationToken ct)
+    public async Task<IActionResult> Process(Guid documentId)
     {
+        // OCR is a long-running background operation — deliberately NOT using
+        // HttpContext.RequestAborted (CancellationToken ct). If the browser disconnects
+        // or the frontend request times out, the request token is cancelled, which would
+        // cancel our HttpClient call to Anthropic mid-flight → Anthropic logs a 499 and
+        // the document gets stuck in Processing because the status-reset also uses the
+        // cancelled token. Using CancellationToken.None ensures Claude always finishes.
         try
         {
-            var result = await _ocr.ProcessDocumentAsync(documentId, ct);
-            // Auto-run validation after every OCR run so results are always fresh.
-            await _validation.ValidateDocumentAsync(documentId, ct);
+            var result = await _ocr.ProcessDocumentAsync(documentId, CancellationToken.None);
+            await _validation.ValidateDocumentAsync(documentId, CancellationToken.None);
             return Ok(result);
         }
         catch (KeyNotFoundException)

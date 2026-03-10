@@ -237,7 +237,9 @@ public class OcrPipelineService : IOcrService
         {
             _logger.LogError(ex, "OCR pipeline failed for {Id}", documentId);
             doc.Status = DocumentStatus.Uploaded;
-            await _docRepo.UpdateAsync(doc, ct);
+            // Use CancellationToken.None — the original token may already be cancelled
+            // (e.g. request aborted), which would prevent the status reset from saving.
+            await _docRepo.UpdateAsync(doc, CancellationToken.None);
             throw;
         }
     }

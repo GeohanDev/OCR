@@ -103,7 +103,9 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient<IClaudeOcrEngine, ClaudeOcrEngine>(client =>
         {
             client.BaseAddress = new Uri("https://api.anthropic.com/");
-            client.Timeout     = TimeSpan.FromMinutes(3);
+            // 8 minutes — Claude Sonnet on large multi-page scanned docs can take 3-5 min.
+            // Keep well above the escalation path (primary + fallback model both running).
+            client.Timeout     = TimeSpan.FromMinutes(8);
         });
 
         // Memory cache for ERP lookups

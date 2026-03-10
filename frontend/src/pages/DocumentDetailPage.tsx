@@ -479,7 +479,8 @@ export default function DocumentDetailPage() {
   if (isLoading) return <div className="text-center py-12 text-muted-foreground">Loading...</div>;
   if (!doc) return <div className="text-center py-12 text-destructive">Document not found.</div>;
 
-  const canOcr  = ['Uploaded', 'PendingReview', 'ReviewInProgress'].includes(doc.status);
+  // Include Processing so users can force-restart a stuck OCR (e.g. previous run timed out).
+  const canOcr  = ['Uploaded', 'PendingReview', 'ReviewInProgress', 'Processing'].includes(doc.status);
   const isRerun = doc.status !== 'Uploaded';
 
   const allValidations = validations ?? [];
