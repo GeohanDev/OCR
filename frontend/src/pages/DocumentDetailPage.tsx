@@ -1010,10 +1010,23 @@ export default function DocumentDetailPage() {
                 }`}>
                   <div className="flex justify-between gap-4 items-center">
                     <dt className="text-muted-foreground text-xs font-medium uppercase tracking-wide flex-shrink-0 flex items-center gap-1">
-                      {!isManual && isPending        && <Loader2       className="h-3 w-3 text-blue-500 animate-spin" />}
-                      {!isManual && !isPending && status === 'Failed'  && <XCircle       className="h-3 w-3 text-red-500" />}
-                      {!isManual && !isPending && status === 'Warning' && <AlertTriangle  className="h-3 w-3 text-amber-500" />}
-                      {!isManual && !isPending && status === 'Passed'  && <CheckCircle    className="h-3 w-3 text-green-500" />}
+                      {!isManual && isPending && (
+                        <Loader2 className="h-3 w-3 text-blue-500 animate-spin flex-shrink-0" />
+                      )}
+                      {!isManual && !isPending && status && (
+                        <button
+                          onClick={e => { e.stopPropagation(); validateField.mutate(field.id); }}
+                          title="Re-validate this field"
+                          className="group relative flex-shrink-0 rounded focus:outline-none"
+                        >
+                          <span className="group-hover:hidden block">
+                            {status === 'Failed'  && <XCircle      className="h-3 w-3 text-red-500" />}
+                            {status === 'Warning' && <AlertTriangle className="h-3 w-3 text-amber-500" />}
+                            {status === 'Passed'  && <CheckCircle   className="h-3 w-3 text-green-500" />}
+                          </span>
+                          <RefreshCw className="h-3 w-3 text-primary hidden group-hover:block" />
+                        </button>
+                      )}
                       {label}
                     </dt>
                     <dd className="flex items-center gap-1.5">
