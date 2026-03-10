@@ -157,6 +157,8 @@ public class ClaudeOcrEngine : IClaudeOcrEngine
         sb.AppendLine();
 
         var activeConfigs = configs.Where(c => c.IsActive).ToList();
+        var checkboxConfigs = activeConfigs.Where(c => c.IsCheckbox).ToList();
+
         if (activeConfigs.Count > 0)
         {
             sb.AppendLine("Use these EXACT fieldNames for the following fields:");
@@ -165,12 +167,27 @@ public class ClaudeOcrEngine : IClaudeOcrEngine
                 sb.Append($"- {c.DisplayLabel ?? c.FieldName} (fieldName: \"{c.FieldName}\"");
                 if (c.AllowMultiple)
                     sb.Append(", extract ALL occurrences as a separate array entry per row");
+                if (c.IsCheckbox)
+                    sb.Append(", BOOLEAN FIELD: output \"true\" or \"false\" only");
                 if (!string.IsNullOrWhiteSpace(c.KeywordAnchor))
                     sb.Append($", look near: \"{c.KeywordAnchor}\"");
                 if (!string.IsNullOrWhiteSpace(c.RegexPattern))
                     sb.Append($", pattern hint: {c.RegexPattern}");
                 sb.AppendLine(")");
             }
+            sb.AppendLine();
+        }
+
+        if (checkboxConfigs.Count > 0)
+        {
+            sb.AppendLine("BOOLEAN FIELD RULES — for each field marked as BOOLEAN:");
+            sb.AppendLine("Output \"true\" if the row shows any of these settlement/payment indicators:");
+            sb.AppendLine("  - A \"PAID\", \"P\", \"C\", \"CR\", \"CLR\", \"Cleared\" or \"Settled\" marker in any column");
+            sb.AppendLine("  - Invoice reference prefixed with CR, CN, or RCN (credit note)");
+            sb.AppendLine("  - Outstanding balance of 0.00 or 0 while an invoice amount exists");
+            sb.AppendLine("  - A payment or credit note reference number in a remittance column");
+            sb.AppendLine("Output \"false\" for all other rows (outstanding / unpaid invoices).");
+            sb.AppendLine("One \"true\" or \"false\" value per table row — same row count as other table fields.");
             sb.AppendLine();
         }
 

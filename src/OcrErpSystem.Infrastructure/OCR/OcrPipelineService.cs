@@ -90,8 +90,10 @@ public class OcrPipelineService : IOcrService
                 fieldConfigs = await _fieldMapping.GetActiveConfigAsync(doc.DocumentTypeId.Value, ct);
 
             // Separate manual-entry fields — they are not extracted by OCR/Claude.
-            var manualEntryConfigs = fieldConfigs.Where(c => c.IsManualEntry).ToList();
-            var ocrFieldConfigs    = fieldConfigs.Where(c => !c.IsManualEntry).ToList();
+            // Exception: isCheckbox fields always go through Claude even when isManualEntry is set,
+            // because Claude can auto-detect payment/credit status from the document.
+            var manualEntryConfigs = fieldConfigs.Where(c => c.IsManualEntry && !c.IsCheckbox).ToList();
+            var ocrFieldConfigs    = fieldConfigs.Where(c => !c.IsManualEntry || c.IsCheckbox).ToList();
 
             // ── Route to Claude or Tesseract based on configuration ───────────
             IReadOnlyList<ProcessedPageImage> pages;

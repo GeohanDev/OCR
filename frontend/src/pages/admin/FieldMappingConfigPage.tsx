@@ -578,21 +578,21 @@ export default function FieldMappingConfigPage() {
                 <input
                   type="checkbox"
                   checked={form.isManualEntry}
-                  onChange={e => setForm(f => ({ ...f, isManualEntry: e.target.checked, isCheckbox: e.target.checked ? f.isCheckbox : false }))}
+                  onChange={e => setForm(f => ({ ...f, isManualEntry: e.target.checked }))}
                   className="mt-0.5 rounded border-border accent-violet-600"
                 />
                 <div>
                   <p className="text-sm font-medium text-foreground">Manual entry field</p>
                   <p className="text-xs text-muted-foreground mt-0.5">
                     Value is not extracted from the document. The user must enter it manually during review.
-                    OCR and Claude will skip this field entirely.
+                    OCR and Claude will skip this field entirely (unless "Display as checkbox" is also enabled).
                   </p>
                 </div>
               </label>
 
-              {/* Checkbox display toggle — only shown for manual entry table fields */}
-              {form.isManualEntry && form.dataSource === 'table' && (
-                <label className={`flex items-start gap-3 border rounded-lg p-3 cursor-pointer transition-colors ml-4 ${
+              {/* Checkbox display toggle — shown for any table field */}
+              {form.dataSource === 'table' && (
+                <label className={`flex items-start gap-3 border rounded-lg p-3 cursor-pointer transition-colors ${
                   form.isCheckbox ? 'border-violet-400 bg-violet-50' : 'border-border hover:bg-muted/30'
                 }`}>
                   <input
@@ -604,9 +604,9 @@ export default function FieldMappingConfigPage() {
                   <div>
                     <p className="text-sm font-medium text-foreground">Display as checkbox</p>
                     <p className="text-xs text-muted-foreground mt-0.5">
-                      Renders a checkbox toggle per table row instead of a text input.
-                      Use this for boolean flags like "Settled by payment/credit note".
-                      Rows with this checked will show a "Settled" badge and be excluded from balance validation.
+                      Renders a checkbox toggle per table row. Claude will automatically detect payment/credit
+                      indicators (PAID, CR, zero balance, etc.) and pre-tick settled rows.
+                      Reviewers can still manually override any row. Settled rows are excluded from balance validation.
                     </p>
                   </div>
                 </label>
