@@ -173,6 +173,44 @@ public class OcrPipelineService : IOcrService
                     false, null));
             }
 
+            // ── Pad AllowMultiple OCR columns to uniform row count ────────────
+            // Claude may extract fewer values for some columns than others (e.g. row 4 of
+            // lineAmount is missing). Without a DB record for that slot the cell shows "—"
+            // with no way to edit or check it. Creating a null-value placeholder gives the
+            // cell an ID so the user can fill it in inline or toggle the checkbox.
+            {
+                var multiConfigs = ocrFieldConfigs.Where(c => c.AllowMultiple).ToList();
+                if (multiConfigs.Count > 0)
+                {
+                    int maxRows = multiConfigs
+                        .Select(c => extractedFields.Count(f =>
+                            f.FieldName.Equals(c.FieldName, StringComparison.OrdinalIgnoreCase)))
+                        .DefaultIfEmpty(0).Max();
+
+                    int padSort = extractedFields.Count;
+                    foreach (var mc in multiConfigs)
+                    {
+                        int existing = extractedFields.Count(f =>
+                            f.FieldName.Equals(mc.FieldName, StringComparison.OrdinalIgnoreCase));
+                        for (int j = existing; j < maxRows; j++)
+                        {
+                            var pad = new ExtractedField
+                            {
+                                SortOrder            = padSort++,
+                                FieldName            = mc.FieldName,
+                                FieldMappingConfigId = mc.Id,
+                                RawValue             = null,
+                                NormalizedValue      = null,
+                                Confidence           = 0m
+                            };
+                            extractedFields.Add(pad);
+                            fieldDtos.Add(new ExtractedFieldDto(
+                                pad.Id, pad.FieldName, null, null, null, null, false, null));
+                        }
+                    }
+                }
+            }
+
             // ── Add empty placeholder entries for manual-entry fields ──────────
             // For AllowMultiple manual-entry fields (e.g. lineSettled), create one placeholder
             // per table row so every row gets its own toggleable field instance.
