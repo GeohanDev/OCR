@@ -1,13 +1,13 @@
 import {
   Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType,
-  Table, TableRow, TableCell, WidthType, ShadingType,
+  Table, TableRow, TableCell, WidthType, ShadingType, BorderStyle,
   convertInchesToTwip, PageBreak, LevelFormat, UnderlineType,
 } from 'docx';
 import { writeFileSync } from 'fs';
 
 // ── Page & column constants ───────────────────────────────────────────────────
-// Letter paper (12240 dxa) minus 1.2" × 2 margins (3456 dxa) = 8784 dxa available
-const AVAIL = 8784;
+// Letter paper (12240 dxa) minus 0.6" × 2 margins (1728 dxa) = 10512 dxa available
+const AVAIL = 10512;
 const pct = (p) => Math.round(AVAIL * p / 100);
 
 // ── Paragraph helpers ─────────────────────────────────────────────────────────
@@ -18,47 +18,75 @@ const p  = (text, extra = {}) => new Paragraph({ children: [new TextRun({ text, 
 const bullet = (text) => new Paragraph({ children: [new TextRun({ text, size: 22 })], bullet: { level: 0 }, spacing: { after: 60 } });
 const gap = () => new Paragraph({ children: [new TextRun({ text: '' })], spacing: { after: 80 } });
 
+// ── Image placeholder ─────────────────────────────────────────────────────────
+// Renders a labelled, bordered box where a diagram/screenshot can be inserted.
+function imgPlaceholder(label) {
+  const border = { style: BorderStyle.SINGLE, size: 6, color: 'AAAAAA' };
+  return new Table({
+    width: { size: AVAIL, type: WidthType.DXA },
+    columnWidths: [AVAIL],
+    borders: { top: border, bottom: border, left: border, right: border, insideH: border, insideV: border },
+    rows: [
+      new TableRow({
+        children: [
+          new TableCell({
+            shading: { fill: 'F7F7F7', type: ShadingType.CLEAR, color: 'auto' },
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                spacing: { before: 600, after: 600 },
+                children: [
+                  new TextRun({ text: `[ ${label} ]`, size: 22, color: '888888', italics: true }),
+                ],
+              }),
+            ],
+            margins: { top: 200, bottom: 200, left: 200, right: 200 },
+          }),
+        ],
+      }),
+    ],
+  });
+}
+
 // ── Table cell helper ─────────────────────────────────────────────────────────
-// No width on cell — width is set on the Table via columnWidths.
-function tcell(text, { isBold = false, fill = undefined } = {}) {
+function tcell(text, { isBold = false, fill = undefined, textColor = undefined } = {}) {
   return new TableCell({
     shading: fill ? { fill, type: ShadingType.CLEAR, color: 'auto' } : undefined,
     children: [new Paragraph({
-      children: [new TextRun({ text: text ?? '', size: 20, bold: isBold })],
+      children: [new TextRun({ text: text ?? '', size: 20, bold: isBold, color: textColor })],
       spacing: { after: 40 },
     })],
     margins: { top: 80, bottom: 80, left: 100, right: 100 },
   });
 }
 
-// Header row factory for uniform table headers
+// Header row factory — dark charcoal background, white text
 function thr(...labels) {
   return new TableRow({
     tableHeader: true,
-    children: labels.map(l => tcell(l, { isBold: true, fill: '1E3A5F' })),
+    children: labels.map(l => tcell(l, { isBold: true, fill: '404040', textColor: 'FFFFFF' })),
   });
 }
 
-// Data row factory — alternating shade for readability
+// Data row factory — subtle light-gray first column, plain white elsewhere
 function tdr(shade, ...values) {
   return new TableRow({
     children: values.map((v, i) =>
-      tcell(v, { fill: i === 0 && shade ? 'EFF6FF' : undefined, isBold: i === 0 && shade }),
+      tcell(v, { fill: i === 0 && shade ? 'F2F2F2' : undefined, isBold: i === 0 && shade }),
     ),
   });
 }
 
 // ── Flow table (step / actor / action / result) ───────────────────────────────
-// columns: 8 / 17 / 45 / 30  (% of available width)
 const FLOW_COLS = [pct(8), pct(17), pct(45), pct(30)];
 
 function flowStep(num, actor, action, result) {
   return new TableRow({
     children: [
-      tcell(num,    { isBold: true }),
-      tcell(actor,  { fill: 'EFF6FF' }),
+      tcell(num,    { isBold: true, fill: 'F2F2F2' }),
+      tcell(actor,  { fill: 'F2F2F2' }),
       tcell(action),
-      tcell(result, { fill: 'F0FDF4' }),
+      tcell(result),
     ],
   });
 }
@@ -71,10 +99,10 @@ function flowTable(rows) {
       new TableRow({
         tableHeader: true,
         children: [
-          tcell('Step',                     { isBold: true, fill: '1E3A5F' }),
-          tcell('Actor',                    { isBold: true, fill: '1E3A5F' }),
-          tcell('Action / Description',     { isBold: true, fill: '1E3A5F' }),
-          tcell('System Response / Result', { isBold: true, fill: '1E3A5F' }),
+          tcell('Step',                     { isBold: true, fill: '404040', textColor: 'FFFFFF' }),
+          tcell('Actor',                    { isBold: true, fill: '404040', textColor: 'FFFFFF' }),
+          tcell('Action / Description',     { isBold: true, fill: '404040', textColor: 'FFFFFF' }),
+          tcell('System Response / Result', { isBold: true, fill: '404040', textColor: 'FFFFFF' }),
         ],
       }),
       ...rows,
@@ -101,19 +129,19 @@ const doc = new Document({
       {
         id: 'Heading1',
         name: 'Heading 1',
-        run:  { size: 36, bold: true, color: '1E3A5F' },
+        run:  { size: 36, bold: true, color: '111111' },
         paragraph: { spacing: { before: 400, after: 120 } },
       },
       {
         id: 'Heading2',
         name: 'Heading 2',
-        run:  { size: 28, bold: true, color: '1E3A5F' },
+        run:  { size: 28, bold: true, color: '222222' },
         paragraph: { spacing: { before: 280, after: 80 } },
       },
       {
         id: 'Heading3',
         name: 'Heading 3',
-        run:  { size: 24, bold: true, color: '2563EB' },
+        run:  { size: 24, bold: true, color: '444444' },
         paragraph: { spacing: { before: 200, after: 60 } },
       },
     ],
@@ -122,10 +150,10 @@ const doc = new Document({
     properties: {
       page: {
         margin: {
-          top:    convertInchesToTwip(1),
-          bottom: convertInchesToTwip(1),
-          left:   convertInchesToTwip(1.2),
-          right:  convertInchesToTwip(1.2),
+          top:    convertInchesToTwip(0.7),
+          bottom: convertInchesToTwip(0.7),
+          left:   convertInchesToTwip(0.6),
+          right:  convertInchesToTwip(0.6),
         },
       },
     },
@@ -133,20 +161,22 @@ const doc = new Document({
 
       // ── Cover page ────────────────────────────────────────────────────────
       new Paragraph({
-        children: [new TextRun({ text: 'OCR ERP Integration System', bold: true, size: 56, color: '1E3A5F' })],
+        children: [new TextRun({ text: 'OCR ERP Integration System', bold: true, size: 56 })],
         alignment: AlignmentType.CENTER,
         spacing: { before: 1440, after: 240 },
       }),
       new Paragraph({
-        children: [new TextRun({ text: 'Application Flow Plan', bold: true, size: 40, color: '2563EB' })],
+        children: [new TextRun({ text: 'Architecture & User Guide', bold: true, size: 40 })],
         alignment: AlignmentType.CENTER,
         spacing: { after: 240 },
       }),
       new Paragraph({
         children: [new TextRun({ text: 'Version 1.0  ·  March 2026', size: 22, color: '6B7280' })],
         alignment: AlignmentType.CENTER,
-        spacing: { after: 1440 },
+        spacing: { after: 480 },
       }),
+      gap(),
+      imgPlaceholder('Insert System Architecture Diagram Here'),
       new Paragraph({ children: [new PageBreak()] }),
 
       // ══════════════════════════════════════════════════════════════════════
@@ -221,6 +251,8 @@ const doc = new Document({
         flowStep('7', 'User',      'Signs out (via menu or session expiry).', 'JWT cleared from storage. Browser redirected to Login page. Next visit always shows a fresh Acumatica login screen.'),
       ]),
       gap(),
+      imgPlaceholder('Insert Screenshot — Login / Auth Flow Here'),
+      gap(),
 
       // ── Flow 2: Upload ─────────────────────────────────────────────────
       h2('Flow 2 — Document Upload'),
@@ -234,6 +266,8 @@ const doc = new Document({
         flowStep('5', 'User',   'Views upload result list. Clicks a document name to navigate to Document Detail.', 'Redirected to Document Detail page for that document.'),
       ]),
       gap(),
+      imgPlaceholder('Insert Screenshot — Upload Page Here'),
+      gap(),
 
       // ── Flow 3: OCR ────────────────────────────────────────────────────
       h2('Flow 3 — OCR Processing'),
@@ -246,6 +280,8 @@ const doc = new Document({
         flowStep('4', 'System', 'Validation is automatically triggered immediately after OCR completes.', 'See Flow 4 — Field Validation.'),
         flowStep('5', 'User',   'Document Detail page auto-refreshes. OCR Summary card displays: confidence %, fields extracted, processing time, and validation found / not found counts.', 'User can proceed to review extracted fields.'),
       ]),
+      gap(),
+      imgPlaceholder('Insert Screenshot / Diagram — OCR Pipeline & Results Here'),
       gap(),
 
       // ── Flow 4: Validation ─────────────────────────────────────────────
@@ -266,6 +302,8 @@ const doc = new Document({
       bullet('Warning (⚠ Review) — Value found but flagged (e.g., inactive vendor). Message displayed below badge.'),
       bullet('Skipped — Validation not applicable (no ERP key configured, or required field already has a value).'),
       gap(),
+      imgPlaceholder('Insert Screenshot — Field Validation Results / Badges Here'),
+      gap(),
 
       // ── Flow 5: Review & Correction ────────────────────────────────────
       h2('Flow 5 — Field Review & Inline Correction'),
@@ -280,6 +318,8 @@ const doc = new Document({
         flowStep('6', 'User',   'Clicks the trash icon on a table row to delete a line item.', 'Row and its validation results removed. OCR result updated.'),
       ]),
       gap(),
+      imgPlaceholder('Insert Screenshot — Split-Pane Review Fields View Here'),
+      gap(),
 
       // ── Flow 6: Mark as Checked ────────────────────────────────────────
       h2('Flow 6 — Mark Document as Checked'),
@@ -290,6 +330,8 @@ const doc = new Document({
         flowStep('2', 'User',   'Clicks "Mark as Checked" in the Action Bar on Document Detail page.', 'Document status changes to "Checked".'),
         flowStep('3', 'System', 'Document status updated in DB. Audit log entry created.', 'Dashboard KPI "Checked" count increments. Document shows Checked badge in Document List.'),
       ]),
+      gap(),
+      imgPlaceholder('Insert Screenshot — Document Detail / Mark as Checked Here'),
       gap(),
 
       // ── Flow 7: Document List ──────────────────────────────────────────
@@ -302,6 +344,8 @@ const doc = new Document({
         flowStep('3', 'User',  'Clicks a document row to open Document Detail.', 'Full document detail view opens.'),
         flowStep('4', 'Admin', 'Clicks "Delete" on Document Detail page, confirms in the confirmation modal.', 'Document, all OCR results, extracted fields, and validation records permanently deleted.'),
       ]),
+      gap(),
+      imgPlaceholder('Insert Screenshot — Document List Page Here'),
       gap(),
 
       // ── Flow 8: Field Mapping Config ───────────────────────────────────
@@ -316,6 +360,8 @@ const doc = new Document({
         flowStep('5', 'System', 'Field mapping saved to DB. Next OCR run for this document type uses the updated configuration immediately.', 'No restart required. Config is active for all subsequent OCR and validation operations.'),
       ]),
       gap(),
+      imgPlaceholder('Insert Screenshot — Field Mapping Config Admin Panel Here'),
+      gap(),
 
       // ── Flow 9: Dashboard ──────────────────────────────────────────────
       h2('Flow 9 — Dashboard Overview'),
@@ -328,6 +374,8 @@ const doc = new Document({
         flowStep('4', 'System', 'Recent Documents list shows the 10 most recently uploaded documents.', 'Each entry shows: filename, status badge, uploader name, upload date/time.'),
       ]),
       gap(),
+      imgPlaceholder('Insert Screenshot — Dashboard KPI Cards Here'),
+      gap(),
 
       // ── Flow 10: Background Sync ───────────────────────────────────────
       h2('Flow 10 — Background Sync (Automated)'),
@@ -339,6 +387,8 @@ const doc = new Document({
         flowStep('3', 'System',    'Compares against local DB: creates new user records for new Acumatica users; updates role, branch, display name, and email for existing users.', 'All local user records kept in sync with Acumatica.'),
         flowStep('4', 'System',    'Job completes. Hangfire schedules next run for the following day.', 'Audit log entry created for the sync run.'),
       ]),
+      gap(),
+      imgPlaceholder('Insert Diagram — Background Sync / Hangfire Job Schedule Here'),
       gap(),
 
       // ══════════════════════════════════════════════════════════════════════
@@ -384,6 +434,8 @@ const doc = new Document({
         ],
       }),
       gap(),
+      imgPlaceholder('Insert Diagram — Document Status State Machine Here'),
+      gap(),
 
       // ══════════════════════════════════════════════════════════════════════
       // 7. ERP Integration Details
@@ -416,6 +468,8 @@ const doc = new Document({
           tdr(true, 'Bill:VendorRef',    'RefNbr',   '✓ RefNbr: GESB-001'),
         ],
       }),
+      gap(),
+      imgPlaceholder('Insert Diagram — ERP Validation Flow / Acumatica Integration Here'),
       gap(),
 
       // ══════════════════════════════════════════════════════════════════════
@@ -482,6 +536,15 @@ const doc = new Document({
           tdr(true, '2026-03-09', 'Add vendor exclusion, vendor-invoice cross-check, CI/CD, post-upload OCR prompt, and change log docs', 'Added vendor exclusion list, cross-check validator, GitHub Actions CI/CD pipeline, auto-OCR prompt after upload, and documentation updates.'),
           tdr(true, '2026-03-09', 'Change the change log format to record only prompt and changes in 1 line each', 'Section 10 change log added to generate-doc.mjs with a simple 3-column table (Date, Prompt, Changes).'),
           tdr(true, '2026-03-09', 'Vendor sync page, document grouping by vendor, outstanding balance/aging validation, Docker build', 'Added Vendor entity + migration, vendor sync service (Acumatica → local DB), VendorManagementPage (Manager+), vendor filter + group-by-vendor in DocumentListPage, ErpVendorStatementValidator for outstanding balance and aging (VendorStatement:* ERP keys), auto-links document to vendor after validation, FetchOpenBillsForVendorAsync in AcumaticaClient.'),
+          tdr(true, '2026-03-10', 'Add manual entry fields, rubbish bin, vendor sync, vendor statement validation, and checkbox field config', 'Added ManualEntry flag to ExtractedField, delete-document (rubbish bin) action in UI, checkbox FieldType with configurable true/false values, vendor statement field validation via ERP keys, and updated OcrPipelineService to support the new field types.'),
+          tdr(true, '2026-03-10', 'Let Claude auto-detect settled/paid status for checkbox table fields', 'OcrPipelineService uses Claude AI to infer boolean settled/paid status from AllowMultiple table fields; ClaudeFieldCorrectionService corrects low-confidence fields using raw OCR context.'),
+          tdr(true, '2026-03-10', 'Fix validation spinner, checkbox in detail table, and dependency-chain skip logic', 'Fixed per-field validation spinner not dismissing; checkbox fields now render correctly in DocumentDetailPage table; dependency-chain validation correctly skips dependent fields when parent fails.'),
+          tdr(true, '2026-03-10', 'Fix auto-validation UI + truncate table row validation messages', 'Auto-validation no longer re-triggers on every render; table row validation messages truncated to single line with tooltip; FieldReviewPanel shows concise inline validation status.'),
+          tdr(true, '2026-03-10', 'Fix 499 client-disconnect error and stuck-Processing documents', 'OcrPipelineService uses a detached CancellationToken for OCR jobs so client disconnects do not abort processing; documents no longer get stuck in Processing state.'),
+          tdr(true, '2026-03-10', 'Fix simultaneous pass/fail messages on same field', 'Validation state machine prevents pass and fail banners from appearing at the same time; only the latest validation result is shown per field.'),
+          tdr(true, '2026-03-10', 'Add per-field re-validate button on status icon hover in Document Detail', 'Hovering the status icon on a field row in DocumentDetailPage reveals a re-validate button that triggers single-field re-validation without running the full document validation.'),
+          tdr(true, '2026-03-10', 'Pad AllowMultiple table columns to uniform row count after OCR', 'OcrPipelineService pads all AllowMultiple (table) field columns to the same row count so the UI renders a complete, aligned table even when OCR misses values in some rows.'),
+          tdr(true, '2026-03-11', 'Reformat doc as architecture & user guide; remove title colors; grayscale tables; add image placeholders', 'Cover retitled to "Architecture & User Guide"; all heading/title colors removed (plain black); table headers changed to dark charcoal with white text; row shading changed to light gray; added image placeholder boxes after System Overview, OCR Pipeline, Review Fields, and State Machine sections.'),
         ],
       }),
       gap(),
@@ -491,6 +554,6 @@ const doc = new Document({
 });
 
 const buffer = await Packer.toBuffer(doc);
-const outPath = 'C:/Users/Harmen/Downloads/test/OCR_ERP_System_App_Flow_Plan.docx';
+const outPath = 'C:/Users/Harmen/Documents/test/OCR_ERP_System_App_Flow_Plan.docx';
 writeFileSync(outPath, buffer);
 console.log('✓ Document written to:', outPath);

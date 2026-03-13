@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>OCR ERP System — Architecture</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #f5f5f5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 36px 24px 48px;
+    }
+
+    h1 {
+      font-size: 16px;
+      font-weight: 700;
+      color: #111;
+      margin-bottom: 4px;
+      letter-spacing: 0.2px;
+    }
+    .subtitle {
+      font-size: 11px;
+      color: #888;
+      margin-bottom: 32px;
+    }
+
+    .diagram {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+      width: 560px;
+    }
+
+    /* ── Layer box ── */
+    .layer {
+      width: 100%;
+      border-radius: 8px;
+      border: 1.5px solid #ccc;
+      background: #fff;
+      padding: 14px 20px;
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+    }
+    .layer-icon {
+      font-size: 22px;
+      line-height: 1;
+      margin-top: 2px;
+      flex-shrink: 0;
+    }
+    .layer-body { flex: 1; }
+    .layer-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #111;
+      margin-bottom: 3px;
+    }
+    .layer-desc {
+      font-size: 11px;
+      color: #555;
+      line-height: 1.55;
+    }
+    .layer-desc span {
+      display: inline-block;
+      background: #f0f0f0;
+      border-radius: 3px;
+      padding: 0px 5px;
+      margin: 1px 2px 1px 0;
+      font-family: 'Consolas', monospace;
+      font-size: 10.5px;
+      color: #333;
+    }
+
+    /* colour variants */
+    .c-blue   { border-color: #93C5FD; background: #EFF6FF; }
+    .c-teal   { border-color: #5EEAD4; background: #F0FDFA; }
+    .c-green  { border-color: #86EFAC; background: #F0FDF4; }
+    .c-orange { border-color: #FCA5A5; background: #FFF1F1; }
+    .c-purple { border-color: #C4B5FD; background: #FAF5FF; }
+    .c-gray   { border-color: #CBD5E1; background: #F8FAFC; }
+    .c-yellow { border-color: #FCD34D; background: #FFFBEB; }
+
+    /* ── Arrow connector ── */
+    .arrow {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      height: 36px;
+      position: relative;
+    }
+    .arrow-line {
+      width: 1.5px;
+      flex: 1;
+      background: #9CA3AF;
+    }
+    .arrow-head {
+      width: 0; height: 0;
+      border-left: 6px solid transparent;
+      border-right: 6px solid transparent;
+      border-top: 8px solid #9CA3AF;
+    }
+    .arrow-label {
+      position: absolute;
+      left: calc(50% + 10px);
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 10px;
+      color: #888;
+      white-space: nowrap;
+    }
+
+    /* ── Side-by-side row for parallel boxes ── */
+    .row {
+      display: flex;
+      gap: 10px;
+      width: 100%;
+    }
+    .row .layer { flex: 1; }
+
+    /* external section divider */
+    .ext-label {
+      width: 100%;
+      text-align: center;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: #aaa;
+      margin: 6px 0 2px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>OCR ERP Integration System — Architecture</h1>
+<p class="subtitle">On-Premise · Docker Compose · March 2026</p>
+
+<div class="diagram">
+
+  <!-- 1. Browser -->
+  <div class="layer c-blue">
+    <div class="layer-icon">🌐</div>
+    <div class="layer-body">
+      <div class="layer-title">Browser — React SPA</div>
+      <div class="layer-desc">
+        <span>React 18</span><span>TypeScript</span><span>Vite</span>
+        <span>Tailwind CSS</span><span>React Query</span><span>react-pdf</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">HTTPS</div></div>
+
+  <!-- 2. nginx -->
+  <div class="layer c-teal">
+    <div class="layer-icon">🔀</div>
+    <div class="layer-body">
+      <div class="layer-title">nginx — Frontend Container</div>
+      <div class="layer-desc">Serves React SPA &nbsp;·&nbsp; Proxies <span>/api</span> to backend &nbsp;·&nbsp; SPA fallback routing</div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">REST / JSON</div></div>
+
+  <!-- 3. API -->
+  <div class="layer c-green">
+    <div class="layer-icon">🔌</div>
+    <div class="layer-body">
+      <div class="layer-title">ASP.NET Core 8 — Web API</div>
+      <div class="layer-desc">
+        Controllers &nbsp;·&nbsp; JWT Auth <span>HS256 · 8 h</span> &nbsp;·&nbsp; RBAC (Normal / Manager / Admin)
+        &nbsp;·&nbsp; <span>Hangfire</span> background scheduler (daily 02:00 AM sync)
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="arrow-line"></div><div class="arrow-head"></div></div>
+
+  <!-- 4. OCR Pipeline -->
+  <div class="layer c-orange">
+    <div class="layer-icon">🔍</div>
+    <div class="layer-body">
+      <div class="layer-title">OCR Pipeline Service</div>
+      <div class="layer-desc">
+        Image pre-processing <span>SkiaSharp</span> &nbsp;·&nbsp; Field extraction &nbsp;·&nbsp;
+        Confidence scoring <span>Tesseract 40% + Regex 30% + Proximity 30%</span>
+        &nbsp;·&nbsp; AllowMultiple table padding
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="arrow-line"></div><div class="arrow-head"></div></div>
+
+  <!-- 5. OCR Engines (side by side) -->
+  <div class="row">
+    <div class="layer c-purple">
+      <div class="layer-icon">🤖</div>
+      <div class="layer-body">
+        <div class="layer-title">Claude AI</div>
+        <div class="layer-desc">Primary &nbsp;·&nbsp; Field extraction &nbsp;·&nbsp; Correction &nbsp;·&nbsp; Checkbox inference</div>
+      </div>
+    </div>
+    <div class="layer c-purple">
+      <div class="layer-icon">📄</div>
+      <div class="layer-body">
+        <div class="layer-title">Tesseract OCR</div>
+        <div class="layer-desc">Fallback engine &nbsp;·&nbsp; <span>TesseractNet</span> wrapper</div>
+      </div>
+    </div>
+    <div class="layer c-purple">
+      <div class="layer-icon">🏓</div>
+      <div class="layer-body">
+        <div class="layer-title">PaddleOCR</div>
+        <div class="layer-desc">Table detection &nbsp;·&nbsp; PP-StructureV3 &nbsp;·&nbsp; HTTP sidecar</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="arrow-line"></div><div class="arrow-head"></div></div>
+
+  <!-- 6. Validation -->
+  <div class="layer c-orange">
+    <div class="layer-icon">✅</div>
+    <div class="layer-body">
+      <div class="layer-title">Validation Service</div>
+      <div class="layer-desc">
+        <span>RequiredFieldValidator</span><span>DynamicErpValidator</span><span>VendorStatementValidator</span>
+        &nbsp;·&nbsp; Per-field re-validate &nbsp;·&nbsp; Dependency-chain skip logic
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="arrow-line"></div><div class="arrow-head"></div></div>
+
+  <!-- 7. Data (side by side) -->
+  <div class="row">
+    <div class="layer c-gray">
+      <div class="layer-icon">🗄</div>
+      <div class="layer-body">
+        <div class="layer-title">PostgreSQL 16</div>
+        <div class="layer-desc"><span>EF Core 8</span><span>Npgsql</span> Code-first migrations &nbsp;·&nbsp; Hangfire store</div>
+      </div>
+    </div>
+    <div class="layer c-gray">
+      <div class="layer-icon">📁</div>
+      <div class="layer-body">
+        <div class="layer-title">File Storage Volume</div>
+        <div class="layer-desc">PDF · PNG · TIFF &nbsp;·&nbsp; Docker bind-mount</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- External divider -->
+  <div class="ext-label">── External Systems ──</div>
+
+  <!-- 8. External (side by side) -->
+  <div class="row">
+    <div class="layer c-yellow">
+      <div class="layer-icon">🏢</div>
+      <div class="layer-body">
+        <div class="layer-title">Acumatica ERP</div>
+        <div class="layer-desc">
+          OData REST <span>v25.100.001</span> &nbsp;·&nbsp; OAuth 2.0 <span>private_key_jwt</span>
+          &nbsp;·&nbsp; Vendors · AP Bills · PO · Inventory · UserManagement
+        </div>
+      </div>
+    </div>
+    <div class="layer c-yellow">
+      <div class="layer-icon">🧠</div>
+      <div class="layer-body">
+        <div class="layer-title">Anthropic API</div>
+        <div class="layer-desc">
+          <span>claude-sonnet-4-6</span> primary &nbsp;·&nbsp; <span>claude-haiku-4-5</span> fallback
+          &nbsp;·&nbsp; Field extraction &amp; correction
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

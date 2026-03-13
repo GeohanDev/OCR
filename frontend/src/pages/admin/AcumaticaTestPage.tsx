@@ -94,6 +94,13 @@ export default function AcumaticaTestPage() {
   const [branchProbeResult, setBranchProbeResult] = useState<LookupState>(EMPTY);
   const [branchResult,      setBranchResult]      = useState<LookupState>(EMPTY);
 
+  // Vendor open bills (outstanding balance)
+  interface OpenBill { referenceNbr: string; vendorRef: string; balance: number; amount: number; dueDate?: string; status: string; }
+  interface OpenBillsResult { vendorId: string; billCount: number; totalBalance: number; bills: OpenBill[]; }
+  const [openBillsVendorInput, setOpenBillsVendorInput] = useState('');
+  const [openBillsMode, setOpenBillsMode] = useState<'id' | 'name'>('name');
+  const [openBillsResult, setOpenBillsResult] = useState<LookupState>(EMPTY);
+
   // Vendor ending balance
   const [balVendorId, setBalVendorId] = useState('');
   const [balPeriod,   setBalPeriod]   = useState('');
@@ -224,6 +231,148 @@ export default function AcumaticaTestPage() {
         state={vendorNameResult}
         onLookup={() => withTokenCheck(() => runLookup(() => erpApi.lookupVendorByName(vendorName), setVendorNameResult, onAuthError))}
       />
+
+      {/* ── Vendor Open Bills (Outstanding Balance) ────────────────────── */}
+      <div className="card p-5 space-y-4">
+        <div>
+          <h2 className="font-semibold text-foreground">Vendor Open Bills — Outstanding Balance</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Fetches all open (unpaid) AP bills for a vendor — the same data and calculation used by the
+            <code className="font-mono mx-1">VendorStatement:OutstandingBalance</code> validator.
+            Enter the vendor name or Acumatica Vendor ID.
+          </p>
+        </div>
+
+        <div className="flex gap-2 items-center">
+          <select
+            className="border border-border rounded px-2 py-1.5 text-sm bg-background"
+            value={openBillsMode}
+            onChange={e => { setOpenBillsMode(e.target.value as 'id' | 'name'); setOpenBillsVendorInput(''); setOpenBillsResult(EMPTY); }}
+          >
+            <option value="name">By Name</option>
+            <option value="id">By Vendor ID</option>
+          </select>
+          <input
+            className="flex-1 border border-border rounded px-3 py-1.5 text-sm bg-background focus:outline-none focus:ring-2 focus:ring-primary/40"
+            placeholder={openBillsMode === 'name' ? 'e.g. ABC SDN BHD' : 'e.g. V00001'}
+            value={openBillsVendorInput}
+            onChange={e => setOpenBillsVendorInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && openBillsVendorInput.trim())
+                withTokenCheck(async () => {
+                  setOpenBillsResult({ loading: true, data: null, error: null });
+                  try {
+                    let vid = openBillsVendorInput.trim();
+                    if (openBillsMode === 'name') {
+                      const vr = await erpApi.lookupVendorByName(vid);
+                      const vd = vr.data as { found: boolean; data?: { vendorId: string } };
+                      if (!vd.found || !vd.data?.vendorId) {
+                        setOpenBillsResult({ loading: false, data: null, error: `Vendor "${vid}" not found in Acumatica.` });
+                        return;
+                      }
+                      vid = vd.data.vendorId;
+                    }
+                    const br = await erpApi.lookupOpenBills(vid);
+                    setOpenBillsResult({ loading: false, data: br.data, error: null });
+                  } catch (e: unknown) {
+                    setOpenBillsResult({ loading: false, data: null, error: (e as { message?: string }).message ?? 'Request failed' });
+                  }
+                });
+            }}
+          />
+          <button
+            className="btn-primary flex items-center gap-2"
+            disabled={!openBillsVendorInput.trim() || openBillsResult.loading}
+            onClick={() => withTokenCheck(async () => {
+              setOpenBillsResult({ loading: true, data: null, error: null });
+              try {
+                let vid = openBillsVendorInput.trim();
+                if (openBillsMode === 'name') {
+                  const vr = await erpApi.lookupVendorByName(vid);
+                  const vd = vr.data as { found: boolean; data?: { vendorId: string } };
+                  if (!vd.found || !vd.data?.vendorId) {
+                    setOpenBillsResult({ loading: false, data: null, error: `Vendor "${vid}" not found in Acumatica.` });
+                    return;
+                  }
+                  vid = vd.data.vendorId;
+                }
+                const br = await erpApi.lookupOpenBills(vid);
+                setOpenBillsResult({ loading: false, data: br.data, error: null });
+              } catch (e: unknown) {
+                setOpenBillsResult({ loading: false, data: null, error: (e as { message?: string }).message ?? 'Request failed' });
+              }
+            })}
+          >
+            {openBillsResult.loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+            Fetch Bills
+          </button>
+        </div>
+
+        {openBillsResult.error && (
+          <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 flex items-center gap-2">
+            <XCircle className="h-4 w-4 flex-shrink-0" /> {openBillsResult.error}
+          </div>
+        )}
+
+        {!openBillsResult.loading && openBillsResult.data !== null && !openBillsResult.error && (() => {
+          const d = openBillsResult.data as OpenBillsResult;
+          return (
+            <div className="space-y-3">
+              <div className={`rounded-lg border p-3 flex items-center justify-between ${d.billCount === 0 ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-green-50 border-green-200 text-green-800'}`}>
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  {d.billCount === 0
+                    ? <><AlertTriangle className="h-4 w-4 flex-shrink-0" /> No open bills found for vendor <code className="font-mono">{d.vendorId}</code></>
+                    : <><CheckCircle className="h-4 w-4 flex-shrink-0" /> {d.billCount} open bill{d.billCount !== 1 ? 's' : ''} for vendor <code className="font-mono mx-1">{d.vendorId}</code></>
+                  }
+                </div>
+                {d.billCount > 0 && (
+                  <span className="text-sm font-bold">
+                    Outstanding: {d.totalBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                )}
+              </div>
+              {d.bills.length > 0 && (
+                <div className="overflow-auto max-h-72 rounded-lg border border-border">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted/50 border-b border-border sticky top-0">
+                      <tr>
+                        <th className="text-left px-3 py-2 font-medium text-muted-foreground">Ref Nbr</th>
+                        <th className="text-left px-3 py-2 font-medium text-muted-foreground">Vendor Ref</th>
+                        <th className="text-left px-3 py-2 font-medium text-muted-foreground">Due Date</th>
+                        <th className="text-left px-3 py-2 font-medium text-muted-foreground">Status</th>
+                        <th className="text-right px-3 py-2 font-medium text-muted-foreground">Amount</th>
+                        <th className="text-right px-3 py-2 font-medium text-muted-foreground">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {d.bills.map((b, i) => (
+                        <tr key={i} className="hover:bg-muted/30">
+                          <td className="px-3 py-2 font-mono text-xs">{b.referenceNbr}</td>
+                          <td className="px-3 py-2 text-muted-foreground">{b.vendorRef || '—'}</td>
+                          <td className="px-3 py-2">{b.dueDate ? new Date(b.dueDate).toLocaleDateString() : '—'}</td>
+                          <td className="px-3 py-2">
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${b.status === 'Open' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
+                              {b.status}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-right">{b.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                          <td className="px-3 py-2 text-right font-semibold">{b.balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-muted/50 border-t border-border">
+                      <tr>
+                        <td colSpan={5} className="px-3 py-2 text-sm font-medium text-right">Total Outstanding</td>
+                        <td className="px-3 py-2 text-right font-bold text-sm">{d.totalBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </div>
 
       {/* ── OData Entity Discovery ─────────────────────────────────────── */}
       <div className="card p-5 space-y-4">

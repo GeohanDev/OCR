@@ -127,11 +127,18 @@ export interface ValidationSummary {
   results: ValidationResult[];
 }
 
+export type DocumentCategory = 'General' | 'VendorStatement';
+export const DOCUMENT_CATEGORIES: { value: DocumentCategory; label: string }[] = [
+  { value: 'General',         label: 'General' },
+  { value: 'VendorStatement', label: 'Vendor Statement' },
+];
+
 export interface DocumentType {
   id: string;
   typeKey: string;
   displayName: string;
   pluginClass: string;
+  category: DocumentCategory;
   isActive: boolean;
   createdAt: string;
 }

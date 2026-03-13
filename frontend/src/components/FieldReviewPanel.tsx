@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ocrApi, validationApi } from '../api/client';
-import { useAuth } from '../contexts/AuthContext';
 // validationApi.run is intentionally unused here — Run Validation fires per-field mutations instead.
 import type { ExtractedField, ValidationResult, FieldMappingConfig } from '../types';
 import { CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Pencil, Trash2, RefreshCw, Loader2, StopCircle } from 'lucide-react';
@@ -99,9 +98,7 @@ export default function FieldReviewPanel({
   selectedFieldId,
 }: FieldReviewPanelProps) {
   const queryClient = useQueryClient();
-  const { logout } = useAuth();
   const [showSummary, setShowSummary] = useState(true);
-  const [sessionError, setSessionError] = useState<string | null>(null);
   // Tracks which field IDs are currently being validated (for spinner/pending UI).
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   // Maps each table field ID → the full list of field IDs in its row, so that
@@ -120,7 +117,6 @@ export default function FieldReviewPanel({
     mutationFn: (fieldId: string) =>
       validationApi.validateField(documentId, fieldId).then(r => r.data as ValidationResult[]),
     onMutate: (fieldId) => {
-      setSessionError(null);
       setPendingIds(prev => new Set([...prev, fieldId]));
     },
     onSettled: (_, __, fieldId) => {
@@ -131,10 +127,6 @@ export default function FieldReviewPanel({
         const base = old ?? [];
         return [...base.filter(v => v.extractedFieldId !== fieldId), ...newResults];
       });
-    },
-    onError: (error: unknown) => {
-      const status = (error as { response?: { status?: number } })?.response?.status;
-      if (status === 424) logout('session_expired');
     },
   });
 
@@ -215,11 +207,6 @@ export default function FieldReviewPanel({
   // - Table rows run column-by-column with per-row AND global failure tracking.
   // Ensures vendor is validated before line items, and invoice ref before amount/balance.
   const runAllValidations = useCallback(async () => {
-    if (!sessionStorage.getItem('acumatica_token')) {
-      logout('session_expired');
-      return;
-    }
-    setSessionError(null);
     stopRequestedRef.current = false;
     setIsRunning(true);
 
@@ -281,7 +268,7 @@ export default function FieldReviewPanel({
     }
 
     if (!stopRequestedRef.current) setIsRunning(false);
-  }, [fields, fieldConfigMap, validateField, logout]);
+  }, [fields, fieldConfigMap, validateField]);
 
   const stopValidation = useCallback(() => {
     stopRequestedRef.current = true;
@@ -367,14 +354,6 @@ export default function FieldReviewPanel({
   return (
     <div className="flex flex-col h-full">
 
-      {/* ── Session expired banner ────────────────────────────────────── */}
-      {sessionError && (
-        <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border-b border-amber-200 text-xs text-amber-800 flex-shrink-0">
-          <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
-          <span className="flex-1">{sessionError}</span>
-          <button onClick={() => setSessionError(null)} className="text-amber-500 hover:text-amber-700">✕</button>
-        </div>
-      )}
 
       {/* ── Validation summary ────────────────────────────────────────── */}
       <div className="border-b border-border bg-background flex-shrink-0">

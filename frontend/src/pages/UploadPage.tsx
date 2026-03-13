@@ -1,10 +1,10 @@
-import { useCallback, useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { documentApi, configApi, ocrApi, validationApi } from '../api/client';
+import { documentApi, configApi, ocrApi } from '../api/client';
 import type { DocumentType } from '../types';
-import { Upload, X, CheckCircle, AlertCircle, FileText, Loader2, ScanLine } from 'lucide-react';
+import { Upload, X, CheckCircle, AlertCircle, FileText, Loader2, ScanLine, Camera } from 'lucide-react';
 
 type FileStatus = 'pending' | 'uploading' | 'done' | 'error';
 
@@ -24,8 +24,7 @@ export default function UploadPage() {
   const [selectedType, setSelectedType] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [showOcrPrompt, setShowOcrPrompt] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [processingError, setProcessingError] = useState<string | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
 
   const { data: docTypes } = useQuery<DocumentType[]>({
     queryKey: ['document-types'],
@@ -59,7 +58,16 @@ export default function UploadPage() {
       }));
       return [...prev, ...newEntries];
     });
-  }, []);
+  }, [selectedType]);
+
+  // Handle photo capture from the device camera
+  const handleCameraCapture = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const captured = Array.from(e.target.files ?? []);
+    if (captured.length === 0) return;
+    // Reset input so the same photo can be re-captured if needed
+    e.target.value = '';
+    onDrop(captured);
+  }, [onDrop]);
 
   const handleDuplicateReplace = () => {
     setFiles(prev => {
@@ -164,24 +172,15 @@ export default function UploadPage() {
     if (allDone) setShowOcrPrompt(true);
   }, [allDone]);
 
-  const handleStartOcrAndValidation = async () => {
+  const handleStartOcrAndValidation = () => {
     const done = files.filter(f => f.status === 'done' && f.documentId);
-    setIsProcessing(true);
-    setProcessingError(null);
-    try {
-      if (done.length === 1) {
-        const docId = done[0].documentId!;
-        await ocrApi.process(docId);
-        await validationApi.run(docId);
-        navigate(`/documents/${docId}`);
-      } else {
-        // Multiple files: kick off OCR for each but navigate away to the list
-        await Promise.allSettled(done.map(d => ocrApi.process(d.documentId!)));
-        navigate('/documents');
-      }
-    } catch {
-      setProcessingError('OCR or validation failed. You can retry from the document page.');
-      setIsProcessing(false);
+    // Fire OCR requests without awaiting — the API returns 202 immediately and
+    // processes in the background. Navigate away right away so the user isn't blocked.
+    done.forEach(d => ocrApi.process(d.documentId!).catch(() => {}));
+    if (done.length === 1 && done[0].documentId) {
+      navigate(`/documents/${done[0].documentId}`);
+    } else {
+      navigate('/documents');
     }
   };
 
@@ -196,7 +195,7 @@ export default function UploadPage() {
 
   return (
     <div className="space-y-6 max-w-2xl mx-auto">
-      <h1 className="text-2xl font-bold text-gray-900">Upload Documents</h1>
+      <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Upload Documents</h1>
 
       {/* Document type selector — required before upload */}
       <div className={`card p-4 ${!selectedType ? 'ring-2 ring-amber-400 ring-offset-1' : 'ring-2 ring-green-400 ring-offset-1'}`}>
@@ -278,30 +277,15 @@ export default function UploadPage() {
               </p>
             </div>
 
-            {processingError && (
-              <p className="text-sm text-red-600 flex items-start gap-2">
-                <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
-                {processingError}
-              </p>
-            )}
-
             <div className="flex justify-end gap-3 pt-1">
-              <button
-                className="btn-secondary"
-                onClick={handleSkipOcr}
-                disabled={isProcessing}
-              >
+              <button className="btn-secondary" onClick={handleSkipOcr}>
                 Skip for Now
               </button>
               <button
                 className="btn-primary flex items-center gap-2"
                 onClick={handleStartOcrAndValidation}
-                disabled={isProcessing}
               >
-                {isProcessing
-                  ? <><Loader2 className="h-4 w-4 animate-spin" /> Processing...</>
-                  : <><ScanLine className="h-4 w-4" /> Start OCR & Validation</>
-                }
+                <ScanLine className="h-4 w-4" /> Start OCR & Validation
               </button>
             </div>
           </div>
@@ -320,28 +304,55 @@ export default function UploadPage() {
         </div>
       )}
 
+      {/* Hidden camera input — capture="environment" opens the rear camera on mobile */}
+      <input
+        ref={cameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={handleCameraCapture}
+        disabled={!selectedType || isUploading}
+      />
+
       {/* Drop zone */}
       <div
         {...getRootProps()}
-        className={`border-2 border-dashed rounded-xl p-10 text-center transition-colors ${
+        className={`border-2 border-dashed rounded-xl p-6 sm:p-10 text-center transition-colors ${
           !selectedType
             ? 'border-gray-200 bg-gray-50 cursor-not-allowed opacity-60'
             : isDragActive ? 'border-blue-400 bg-blue-50 cursor-pointer'
             : 'border-gray-300 hover:border-gray-400 bg-white cursor-pointer'
         }`}
-        onClick={!selectedType ? e => e.stopPropagation() : undefined}
+        {...(!selectedType ? { onClick: (e: React.MouseEvent) => e.stopPropagation() } : {})}
       >
         <input {...getInputProps()} />
-        <Upload className="h-10 w-10 text-gray-400 mx-auto mb-3" />
+        <Upload className="h-8 w-8 sm:h-10 sm:w-10 text-gray-400 mx-auto mb-3" />
         {isDragActive ? (
           <p className="text-blue-600 font-medium">Drop files here...</p>
         ) : (
           <>
-            <p className="text-gray-700 font-medium">Drag & drop files here, or click to browse</p>
-            <p className="text-sm text-gray-500 mt-1">PDF, PNG, JPG, TIFF — up to 50 MB each</p>
+            <p className="text-gray-700 font-medium text-sm sm:text-base">
+              <span className="hidden sm:inline">Drag & drop files here, or </span>
+              <span className="text-primary font-semibold">Tap to browse files</span>
+            </p>
+            <p className="text-xs sm:text-sm text-gray-500 mt-1">PDF, PNG, JPG, TIFF — up to 50 MB each</p>
           </>
         )}
       </div>
+
+      {/* Camera button — only shown on mobile (sm:hidden), only when a type is selected */}
+      {selectedType && (
+        <button
+          type="button"
+          onClick={() => cameraInputRef.current?.click()}
+          disabled={isUploading}
+          className="sm:hidden w-full flex items-center justify-center gap-3 py-3.5 rounded-xl border-2 border-dashed border-primary/40 bg-primary/5 text-primary font-medium text-sm hover:bg-primary/10 active:bg-primary/15 transition-colors disabled:opacity-50"
+        >
+          <Camera className="h-5 w-5" />
+          Take Photo with Camera
+        </button>
+      )}
 
       {/* File queue */}
       {files.length > 0 && (

@@ -122,7 +122,7 @@ export default function RubbishBinPage() {
 
       {/* Documents tab */}
       {tab === 'documents' && (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           {docsLoading ? (
             <div className="px-4 py-8 text-center text-muted-foreground flex items-center justify-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading...
@@ -181,7 +181,7 @@ export default function RubbishBinPage() {
       {tab === 'config' && isAdmin && (
         <div className="space-y-4">
           {/* Document Types */}
-          <div className="card overflow-hidden">
+          <div className="card overflow-x-auto">
             <div className="px-4 py-3 border-b border-border bg-muted/30">
               <p className="text-sm font-semibold text-foreground">Document Types</p>
             </div>
@@ -229,7 +229,7 @@ export default function RubbishBinPage() {
           </div>
 
           {/* Individual Field Configs */}
-          <div className="card overflow-hidden">
+          <div className="card overflow-x-auto">
             <div className="px-4 py-3 border-b border-border bg-muted/30">
               <p className="text-sm font-semibold text-foreground">Field Mappings</p>
             </div>

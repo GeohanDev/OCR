@@ -22,13 +22,13 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Restore
-        run: dotnet restore OcrErpSystem.sln
+        run: dotnet restore OcrSystem.sln
 
       - name: Build
-        run: dotnet build OcrErpSystem.sln --configuration Release --no-restore
+        run: dotnet build OcrSystem.sln --configuration Release --no-restore
 
       - name: Test
-        run: dotnet test OcrErpSystem.sln --configuration Release --no-build --verbosity normal
+        run: dotnet test OcrSystem.sln --configuration Release --no-build --verbosity normal
 
   # ── Build & test React frontend ────────────────────────────────────────
   build-frontend:

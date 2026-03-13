@@ -26,7 +26,9 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
-// On 401, clear the stale token and redirect to login so auto-login retries.
+// Global session handling:
+//   401 → JWT expired — clear app token, redirect to login.
+//   424 → Acumatica session expired — clear all tokens, force full logout.
 // Skip /auth/ routes — they handle their own errors.
 apiClient.interceptors.response.use(
   (r) => r,
@@ -35,6 +37,12 @@ apiClient.interceptors.response.use(
     if (error.response?.status === 401 && !url.includes('/auth/')) {
       sessionStorage.removeItem('access_token');
       window.location.href = '/login';
+    }
+    if (error.response?.status === 424) {
+      sessionStorage.removeItem('access_token');
+      sessionStorage.removeItem('acumatica_token');
+      localStorage.setItem('auth-logged-out', '1');
+      window.location.href = '/login?error=session_expired';
     }
     return Promise.reject(error);
   }
@@ -69,6 +77,8 @@ export const ocrApi = {
     apiClient.get(`/ocr/${documentId}/result`),
   getRawText: (documentId: string) =>
     apiClient.get(`/ocr/${documentId}/raw-text`),
+  runPaddleRaw: (documentId: string) =>
+    apiClient.post(`/ocr/${documentId}/paddle-raw`),
   correctField: (documentId: string, fieldId: string, correctedValue: string) =>
     apiClient.patch(`/ocr/${documentId}/fields/${fieldId}`, { correctedValue }),
   deleteField: (documentId: string, fieldId: string) =>
@@ -117,6 +127,8 @@ export const erpApi = {
     apiClient.get(`/erp/probe/${entity}`),
   lookupVendorBalance: (vendorId: string, period: string) =>
     apiClient.get('/erp/lookup/vendor-balance', { params: { vendorId, period } }),
+  lookupOpenBills: (vendorId: string) =>
+    apiClient.get('/erp/lookup/open-bills', { params: { vendorId } }),
 };
 
 // ── Config ────────────────────────────────────────────────────────────
@@ -124,6 +136,8 @@ export const configApi = {
   getDocumentTypes: () => apiClient.get('/config/document-types'),
   registerDocumentType: (data: unknown) =>
     apiClient.post('/config/document-types', data),
+  updateDocumentType: (typeId: string, data: { displayName: string; category: string }) =>
+    apiClient.patch(`/config/document-types/${typeId}`, data),
   getFieldMappings: (typeId: string) =>
     apiClient.get(`/config/document-types/${typeId}/fields`),
   createFieldMapping: (typeId: string, data: unknown) =>

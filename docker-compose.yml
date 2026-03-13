@@ -6,16 +6,33 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ocrerp
+      POSTGRES_DB: ocr_system
       POSTGRES_USER: app
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U app -d ocrerp"]
+      test: ["CMD-SHELL", "pg_isready -U app -d ocr_system"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # ── PaddleOCR microservice (Step 3 — PP-OCRv5 + PP-StructureV3) ─────
+  paddleocr:
+    build:
+      context: ./paddleocr
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      - paddleocr_models:/root/.paddleocr   # cache model weights across restarts
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s   # allow time for model download on first start
 
   # ── API (ASP.NET Core 8) ──────────────────────────────────────────────
   api:
@@ -26,9 +43,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      paddleocr:
+        condition: service_healthy
     environment:
       ASPNETCORE_ENVIRONMENT: Production
-      ConnectionStrings__Default: "Host=db;Port=5432;Database=ocrerp;Username=app;Password=${DB_PASSWORD}"
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=ocr_system;Username=app;Password=${DB_PASSWORD}"
       Acumatica__Authority: ${ACUMATICA_URL}/identity
       Acumatica__BaseUrl: ${ACUMATICA_URL}
       Acumatica__ApiVersion: ${ACUMATICA_API_VERSION:-24.200.001}
@@ -58,6 +77,7 @@ services:
       Anthropic__ApiKey: ${ANTHROPIC_API_KEY:-}
       Anthropic__PrimaryModel: ${ANTHROPIC_PRIMARY_MODEL:-claude-haiku-4-5-20251001}
       Anthropic__FallbackModel: ${ANTHROPIC_FALLBACK_MODEL:-claude-sonnet-4-6}
+      PaddleOcr__BaseUrl: http://paddleocr:8001
     volumes:
       - document_storage:/data/documents
       - tessdata:/data/tessdata
@@ -88,3 +108,4 @@ volumes:
   pg_data:
   document_storage:
   tessdata:
+  paddleocr_models:
