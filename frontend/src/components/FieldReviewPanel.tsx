@@ -1,9 +1,54 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ocrApi, validationApi } from '../api/client';
+import { ocrApi, validationApi, documentApi, erpApi } from '../api/client';
 // validationApi.run is intentionally unused here — Run Validation fires per-field mutations instead.
 import type { ExtractedField, ValidationResult, FieldMappingConfig } from '../types';
-import { CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Pencil, Trash2, RefreshCw, Loader2, StopCircle } from 'lucide-react';
+import { CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, Pencil, Trash2, RefreshCw, Loader2, StopCircle, PlusCircle, ExternalLink } from 'lucide-react';
+
+// ── Acumatica deep-link builder ───────────────────────────────────────────────
+// Constructs a "Main?ScreenId=..." URL to the exact ERP record that was used
+// for validation, so reviewers can open it with one click.
+function buildAcumaticaUrl(baseUrl: string, validationType: string, erpRef: unknown): string | null {
+  if (!baseUrl || !erpRef || typeof erpRef !== 'object') return null;
+  const ref = erpRef as Record<string, unknown>;
+
+  switch (validationType) {
+    case 'ErpApInvoice': {
+      const refNbr = ref['RefNbr'] as string | undefined;
+      const docType = (ref['DocType'] as string | undefined) ?? 'INV';
+      const vendorId = ref['VendorId'] as string | undefined;
+      if (!refNbr) return null;
+      const vendor = vendorId ? `&VendorID=${encodeURIComponent(vendorId)}` : '';
+      return `${baseUrl}/Main?ScreenId=AP301000&DocType=${encodeURIComponent(docType)}&RefNbr=${encodeURIComponent(refNbr)}${vendor}`;
+    }
+    case 'DynamicErp': {
+      const refNbr = ref['ReferenceNbr'] as string | undefined;
+      const type = (ref['Type'] as string | undefined) ?? 'INV';
+      const vendorId = ref['Vendor'] as string | undefined;
+      if (!refNbr) return null;
+      const vendor = vendorId ? `&VendorID=${encodeURIComponent(vendorId)}` : '';
+      return `${baseUrl}/Main?ScreenId=AP301000&DocType=${encodeURIComponent(type)}&RefNbr=${encodeURIComponent(refNbr)}${vendor}`;
+    }
+    case 'ErpVendor':
+    case 'ErpVendorName': {
+      const vendorId = ref['VendorId'] as string | undefined;
+      if (!vendorId) return null;
+      return `${baseUrl}/Main?ScreenId=AP303000&AcctCD=${encodeURIComponent(vendorId)}`;
+    }
+    case 'ErpBranch': {
+      const branchId = ref['BranchId'] as string | undefined;
+      if (!branchId) return null;
+      return `${baseUrl}/Main?ScreenId=GL102000&BranchCD=${encodeURIComponent(branchId)}`;
+    }
+    case 'ErpCurrency': {
+      const code = ref['CurrencyCode'] as string | undefined;
+      if (!code) return null;
+      return `${baseUrl}/Main?ScreenId=CM202000&CuryID=${encodeURIComponent(code)}`;
+    }
+    default:
+      return null;
+  }
+}
 
 interface FieldReviewPanelProps {
   documentId: string;
@@ -23,7 +68,7 @@ function InlineEditCell({
   field: ExtractedField;
   onSave: (id: string, val: string) => void;
 }) {
-  const displayVal = field.isManuallyCorreected && field.correctedValue
+  const displayVal = field.isManuallyCorreected && field.correctedValue != null
     ? field.correctedValue
     : field.normalizedValue ?? field.rawValue ?? '';
 
@@ -111,6 +156,14 @@ export default function FieldReviewPanel({
     retry: false,
   });
 
+  const { data: acumaticaConfig } = useQuery({
+    queryKey: ['erp', 'acumatica-base-url'],
+    queryFn: () => erpApi.getAcumaticaBaseUrl().then(r => r.data),
+    staleTime: Infinity,
+    retry: false,
+  });
+  const acumaticaBaseUrl = acumaticaConfig?.baseUrl ?? '';
+
   // Per-field validation: only re-validates the changed field and surgically
   // updates the cache — other fields' results are preserved.
   const validateField = useMutation({
@@ -135,11 +188,18 @@ export default function FieldReviewPanel({
   const [isRunning, setIsRunning] = useState(false);
   const stopRequestedRef = useRef(false);
 
+  const setValidating = useCallback((flag: boolean) => {
+    documentApi.setValidating(documentId, flag).catch(() => {});
+  }, [documentId]);
+
   const correctField = useMutation({
     mutationFn: ({ fieldId, value }: { fieldId: string; value: string }) =>
       ocrApi.correctField(documentId, fieldId, value),
     onSuccess: (_, { fieldId }) => {
       queryClient.invalidateQueries({ queryKey: ['ocr-result', documentId] });
+      // Refresh document + list so vendorName corrections are reflected immediately.
+      queryClient.invalidateQueries({ queryKey: ['document', documentId] });
+      queryClient.invalidateQueries({ queryKey: ['documents'] });
       const rowIds = fieldToRowRef.current.get(fieldId);
       if (rowIds && rowIds.length > 1) {
         // Table cell: only re-validate siblings that have ERP mapping configured.
@@ -152,15 +212,38 @@ export default function FieldReviewPanel({
     },
   });
 
+  // Per-row delete loading state: tracks the first fieldId of each row being deleted.
+  const [deletingRowIds, setDeletingRowIds] = useState<Set<string>>(new Set());
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
   // Delete all field IDs belonging to a table row (one per column at that index).
   const deleteRow = useMutation({
     mutationFn: (fieldIds: string[]) =>
       Promise.all(fieldIds.map(id => ocrApi.deleteField(documentId, id))),
+    onMutate: (fieldIds) => {
+      if (fieldIds[0]) setDeletingRowIds(prev => new Set([...prev, fieldIds[0]]));
+      setDeleteError(null);
+    },
+    onSettled: (_data, _err, fieldIds) => {
+      if (fieldIds[0]) setDeletingRowIds(prev => { const next = new Set(prev); next.delete(fieldIds[0]); return next; });
+    },
     onSuccess: () => {
       // Invalidate both so the server re-fetches reflect the deleted field's
       // validation results being removed (backend deletes them on field delete).
       queryClient.invalidateQueries({ queryKey: ['ocr-result', documentId] });
       queryClient.invalidateQueries({ queryKey: ['validation', documentId] });
+    },
+    onError: (error: unknown) => {
+      const msg = error instanceof Error ? error.message : 'Delete failed';
+      setDeleteError(msg);
+    },
+  });
+
+  const addTableRow = useMutation({
+    mutationFn: (columns: { fieldName: string; fieldMappingConfigId?: string }[]) =>
+      ocrApi.addTableRow(documentId, columns),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['ocr-result', documentId] });
     },
   });
 
@@ -202,6 +285,25 @@ export default function FieldReviewPanel({
     }).map(f => f.id),
   [fields, fieldConfigMap]);
 
+  const validateRow = useCallback((fieldIds: string[]) => {
+    const ids = fieldIds.filter(fid => validatableFieldIds.includes(fid));
+    if (ids.length === 0) return;
+    ids.forEach(fid => setPendingIds(prev => new Set([...prev, fid])));
+    validationApi.validateRow(documentId, ids)
+      .then(res => {
+        const newResults = res.data as ValidationResult[];
+        queryClient.setQueryData<ValidationResult[]>(['validation', documentId], old => {
+          const base = old ?? [];
+          const idSet = new Set(ids);
+          return [...base.filter(v => !v.extractedFieldId || !idSet.has(v.extractedFieldId)), ...newResults];
+        });
+      })
+      .catch(() => {})
+      .finally(() => {
+        ids.forEach(fid => setPendingIds(prev => { const next = new Set(prev); next.delete(fid); return next; }));
+      });
+  }, [documentId, validatableFieldIds, queryClient]);
+
   // Sequential validation with dependency-chain support:
   // - Header fields run one-by-one; if a field fails, dependents are skipped.
   // - Table rows run column-by-column with per-row AND global failure tracking.
@@ -209,6 +311,7 @@ export default function FieldReviewPanel({
   const runAllValidations = useCallback(async () => {
     stopRequestedRef.current = false;
     setIsRunning(true);
+    setValidating(true);
 
     const validatable = fields.filter(f => {
       const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
@@ -246,37 +349,68 @@ export default function FieldReviewPanel({
     for (const name of colNames) groupedCols[name] = fields.filter(f => f.fieldName === name);
     const maxRows = colNames.length > 0 ? Math.max(...Object.values(groupedCols).map(g => g.length), 0) : 0;
 
-    for (let i = 0; i < maxRows; i++) {
-      if (stopRequestedRef.current) break;
-      const failedRowFieldNames = new Set<string>();
+    // 2. Run all table rows in parallel using ValidateRowAsync (one ERP lookup per row).
+    if (maxRows > 0) {
       const sortedCols = [...colNames].sort((a, b) =>
         (fieldConfigMap[a.toLowerCase()]?.displayOrder ?? 999) -
         (fieldConfigMap[b.toLowerCase()]?.displayOrder ?? 999));
-      for (const name of sortedCols) {
-        if (stopRequestedRef.current) break;
-        const f = groupedCols[name]?.[i];
-        if (!f || !fieldConfigMap[name.toLowerCase()]?.erpMappingKey) continue;
-        const cfg = fieldConfigMap[name.toLowerCase()];
-        const depKey = cfg?.dependentFieldKey?.toLowerCase();
-        if (depKey && (failedFieldNames.has(depKey) || failedRowFieldNames.has(depKey))) continue;
-        try {
-          const results = await validateField.mutateAsync(f.id);
-          if (results.some((r: ValidationResult) => r.status === 'Failed'))
-            failedRowFieldNames.add(name.toLowerCase());
-        } catch { /* onError handles 424 */ }
-      }
+      const rowPromises = Array.from({ length: maxRows }, (_, i) => {
+        const rowFields = sortedCols
+          .map(name => groupedCols[name]?.[i])
+          .filter((f): f is ExtractedField => f !== undefined);
+        const ids = rowFields
+          .filter(f => fieldConfigMap[f.fieldName.toLowerCase()]?.erpMappingKey &&
+                       !fieldConfigMap[f.fieldName.toLowerCase()]?.isManualEntry &&
+                       !fieldConfigMap[f.fieldName.toLowerCase()]?.isCheckbox)
+          .map(f => f.id);
+        if (ids.length === 0) return Promise.resolve();
+        ids.forEach(fid => setPendingIds(prev => new Set([...prev, fid])));
+        return validationApi.validateRow(documentId, ids)
+          .then(res => {
+            const newResults = res.data as ValidationResult[];
+            queryClient.setQueryData<ValidationResult[]>(['validation', documentId], old => {
+              const base = old ?? [];
+              const idSet = new Set(ids);
+              return [...base.filter(v => !v.extractedFieldId || !idSet.has(v.extractedFieldId)), ...newResults];
+            });
+          })
+          .catch(() => {})
+          .finally(() => {
+            ids.forEach(fid => setPendingIds(prev => { const next = new Set(prev); next.delete(fid); return next; }));
+          });
+      });
+      await Promise.all(rowPromises);
     }
 
-    if (!stopRequestedRef.current) setIsRunning(false);
-  }, [fields, fieldConfigMap, validateField]);
+    setValidating(false);
+    setIsRunning(false);
+  }, [fields, fieldConfigMap, validateField, setValidating, documentId, queryClient]);
 
   const stopValidation = useCallback(() => {
     stopRequestedRef.current = true;
     setIsRunning(false);
     setPendingIds(new Set());
-  }, []);
+    setValidating(false);
+  }, [setValidating]);
 
   const isValidating = isRunning || allFieldIds.some(id => pendingIds.has(id));
+
+  // Stop the running validation loop when documentId changes (user navigates to a different
+  // document while this component is reused by React Router without unmounting).
+  useEffect(() => {
+    return () => {
+      stopRequestedRef.current = true;
+      setIsRunning(false);
+      setPendingIds(new Set());
+      documentApi.setValidating(documentId, false).catch(() => {});
+    };
+  }, [documentId]);
+
+  const PAGE_SIZE = 30;
+  const [tablePage, setTablePage] = useState(1);
+
+  // Reset pagination to page 1 whenever the document changes.
+  useEffect(() => { setTablePage(1); }, [documentId]);
 
   const isTableField = useCallback((fieldName: string) => {
     const cfg = fieldConfigMap[fieldName.toLowerCase()];
@@ -307,6 +441,15 @@ export default function FieldReviewPanel({
   const tableRowCount = useMemo(() =>
     Math.max(...Object.values(tableFieldGroups).map(g => g.length), 0),
   [tableFieldGroups]);
+
+  const totalPages = Math.ceil(tableRowCount / PAGE_SIZE);
+  const pageStart = (tablePage - 1) * PAGE_SIZE;  // inclusive index
+  const pageEnd   = Math.min(tablePage * PAGE_SIZE, tableRowCount);  // exclusive index
+
+  // AllowMultiple configs — used to build the "+ Add Row" column list even when no rows exist yet.
+  const tableConfigColumns = useMemo(() =>
+    (fieldConfigs ?? []).filter(c => c.allowMultiple),
+  [fieldConfigs]);
 
   // Compute which table-row field IDs belong to "settled" rows (any isCheckbox
   // column in that row has correctedValue / normalizedValue === "true").
@@ -434,8 +577,8 @@ export default function FieldReviewPanel({
             {/* ── Header Fields ─────────────────────────────────────── */}
             {headerFields.length > 0 && (
               <div>
-                <div className="px-4 py-2 bg-blue-50 border-b border-border">
-                  <p className="text-xs font-semibold text-blue-700 uppercase tracking-wide">Header Fields</p>
+                <div className="px-4 py-2 bg-muted/30 border-b border-border">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Header Fields</p>
                 </div>
                 <div className="divide-y divide-border">
                   {headerFields.map(field => {
@@ -452,7 +595,7 @@ export default function FieldReviewPanel({
                         className={`px-4 py-2.5 cursor-pointer transition-colors border-l-2 ${
                           isSelected       ? 'bg-primary/10 border-l-primary'
                           : isManual       ? 'bg-violet-50/50 border-l-violet-400'
-                          : isPending      ? 'bg-blue-50/40 border-l-blue-300'
+                          : isPending      ? 'bg-muted/40 border-l-muted-foreground/30'
                           : status === 'Failed'  ? 'bg-red-50 border-l-red-400'
                           : status === 'Warning' ? 'bg-amber-50 border-l-amber-400'
                           : status === 'Passed'  ? 'bg-green-50/50 border-l-green-400'
@@ -464,7 +607,7 @@ export default function FieldReviewPanel({
                         <div className="flex items-center gap-1.5 mb-1">
                           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex-1">{label}</span>
                           {isManual && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 font-medium">Manual</span>}
-                          {!isManual && isPending        && <Loader2       className="h-3 w-3 text-blue-500 animate-spin" />}
+                          {!isManual && isPending        && <Loader2       className="h-3 w-3 text-muted-foreground animate-spin" />}
                           {!isManual && !isPending && status === 'Failed'  && <XCircle       className="h-3 w-3 text-red-500" />}
                           {!isManual && !isPending && status === 'Warning' && <AlertTriangle  className="h-3 w-3 text-amber-500" />}
                           {!isManual && !isPending && status === 'Passed'  && <CheckCircle    className="h-3 w-3 text-green-500" />}
@@ -489,13 +632,28 @@ export default function FieldReviewPanel({
                           const erpSuggestion = (v.status === 'Warning' || v.status === 'Failed') && v.erpResponseField
                             ? getErpValue(v.erpReference, v.erpResponseField)
                             : undefined;
+                          const erpLink = buildAcumaticaUrl(acumaticaBaseUrl, v.validationType, v.erpReference);
                           return (
                             <div key={v.id} className="mt-0.5 space-y-0.5">
-                              <span className={`text-xs px-1.5 py-0.5 rounded font-medium font-mono ${
-                                v.status === 'Passed' ? 'bg-green-100 text-green-700'
-                                : v.status === 'Warning' ? 'bg-amber-100 text-amber-700'
-                                : 'bg-red-100 text-red-700'
-                              }`}>{badgeLabel}</span>
+                              <div className="flex items-center gap-1 flex-wrap">
+                                <span className={`text-xs px-1.5 py-0.5 rounded font-medium font-mono ${
+                                  v.status === 'Passed' ? 'bg-green-100 text-green-700'
+                                  : v.status === 'Warning' ? 'bg-amber-100 text-amber-700'
+                                  : 'bg-red-100 text-red-700'
+                                }`}>{badgeLabel}</span>
+                                {erpLink && (
+                                  <a
+                                    href={erpLink}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Open in Acumatica"
+                                    className="inline-flex items-center gap-0.5 text-[10px] text-blue-500 hover:text-blue-700 hover:underline"
+                                  >
+                                    <ExternalLink className="h-2.5 w-2.5" />
+                                    Acumatica
+                                  </a>
+                                )}
+                              </div>
                               {v.message && (
                                 <p className={`text-xs leading-tight ${
                                   v.status === 'Passed' ? 'text-green-600'
@@ -504,7 +662,7 @@ export default function FieldReviewPanel({
                                 }`}>{v.message}</p>
                               )}
                               {erpSuggestion && (
-                                <p className="text-xs text-blue-600 leading-tight">
+                                <p className="text-xs text-muted-foreground leading-tight">
                                   → Correct value in ERP: <span className="font-mono font-medium">{erpSuggestion}</span>
                                 </p>
                               )}
@@ -519,14 +677,44 @@ export default function FieldReviewPanel({
             )}
 
             {/* ── Table Fields ──────────────────────────────────────── */}
-            {tableRowCount > 0 && (
+            {(tableRowCount > 0 || tableConfigColumns.length > 0) && (
               <div>
-                <div className="px-4 py-2 bg-purple-50 border-y border-border">
+                {deleteError && (
+                  <div className="mx-4 mt-2 px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-700 flex items-center justify-between">
+                    <span>Delete failed: {deleteError}</span>
+                    <button onClick={() => setDeleteError(null)} className="ml-2 text-red-400 hover:text-red-600">✕</button>
+                  </div>
+                )}
+                <div className="px-4 py-2 bg-purple-50 border-y border-border flex items-center justify-between">
                   <p className="text-xs font-semibold text-purple-700 uppercase tracking-wide">
                     Table Data <span className="font-normal text-purple-500">({tableRowCount} rows)</span>
                   </p>
+                  {totalPages > 1 && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setTablePage(p => Math.max(1, p - 1))}
+                        disabled={tablePage === 1}
+                        className="px-2 py-0.5 text-xs rounded border border-border bg-background text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        ← Prev
+                      </button>
+                      <span className="text-xs text-purple-600 font-medium whitespace-nowrap">
+                        Page {tablePage} of {totalPages}
+                      </span>
+                      <button
+                        onClick={() => setTablePage(p => Math.min(totalPages, p + 1))}
+                        disabled={tablePage === totalPages}
+                        className="px-2 py-0.5 text-xs rounded border border-border bg-background text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        Next →
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div>
+                  {tableRowCount === 0 && (
+                    <p className="px-4 py-3 text-xs text-muted-foreground italic">No rows yet. Click below to add one.</p>
+                  )}
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-border bg-muted/30">
@@ -540,11 +728,13 @@ export default function FieldReviewPanel({
                           );
                         })}
                         <th className="px-2 py-2 text-muted-foreground text-xs">Valid.</th>
+                        <th className="px-2 py-2 text-muted-foreground text-xs"></th>
                         <th className="px-2 py-2"></th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
-                      {Array.from({ length: tableRowCount }, (_, i) => {
+                      {Array.from({ length: pageEnd - pageStart }, (_, idx) => {
+                        const i = pageStart + idx;
                         const rowConfs = tableColumnNames
                           .map(n => tableFieldGroups[n]?.[i]?.confidence)
                           .filter((c): c is number => c !== undefined);
@@ -604,11 +794,21 @@ export default function FieldReviewPanel({
 
                               const cellStatus = cellField ? getValidationStatus(cellField.id) : null;
                               const cellPending = cellField ? pendingIds.has(cellField.id) : false;
+                              const isCreditCol = /credit|payment/i.test(name);
+                              const debitColName = isCreditCol
+                                ? tableColumnNames.find(n => /amount|debit/i.test(n) && !/credit|payment/i.test(n))
+                                : undefined;
+                              const debitField = debitColName ? tableFieldGroups[debitColName]?.[i] : undefined;
+                              const debitValue = debitField
+                                ? (debitField.isManuallyCorreected && debitField.correctedValue != null
+                                    ? debitField.correctedValue
+                                    : (debitField.normalizedValue ?? debitField.rawValue ?? ''))
+                                : '';
                               return (
                                 <td
                                   key={name}
                                   className={`px-2 py-2 transition-colors ${
-                                    cellPending      ? 'bg-blue-50'
+                                    cellPending      ? 'bg-muted/40'
                                     : cellStatus === 'Failed'  ? 'bg-red-100/80 border-b border-red-300'
                                     : cellStatus === 'Warning' ? 'bg-amber-50/80 border-b border-amber-200'
                                     : cellStatus === 'Passed'  ? 'bg-green-50/60'
@@ -617,7 +817,20 @@ export default function FieldReviewPanel({
                                   onClick={e => e.stopPropagation()}
                                 >
                                   {cellField
-                                    ? <InlineEditCell field={cellField} onSave={save} />
+                                    ? (
+                                      <div className="flex items-center gap-1">
+                                        <InlineEditCell field={cellField} onSave={save} />
+                                        {isCreditCol && debitField && debitValue && (
+                                          <button
+                                            onClick={e => { e.stopPropagation(); save(cellField.id, debitValue); }}
+                                            title={`Mirror debit amount: ${debitValue}`}
+                                            className="flex-shrink-0 text-[10px] px-1 py-0.5 rounded text-blue-600 hover:bg-blue-50 border border-blue-200 leading-none"
+                                          >
+                                            ↕
+                                          </button>
+                                        )}
+                                      </div>
+                                    )
                                     : <span className="text-muted-foreground">—</span>}
                                 </td>
                               );
@@ -627,7 +840,7 @@ export default function FieldReviewPanel({
                               {isSettled ? (
                                 <span className="text-xs font-medium text-violet-600 px-1.5 py-0.5 bg-violet-50 rounded">Settled</span>
                               ) : rowIsPending ? (
-                                <span className="inline-flex items-center gap-1 text-xs text-blue-500">
+                                <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                                   <Loader2 className="h-3 w-3 animate-spin" /> Checking
                                 </span>
                               ) : rowStatus === 'Failed' ? (
@@ -653,21 +866,89 @@ export default function FieldReviewPanel({
                                 <span className="text-xs text-muted-foreground/40">—</span>
                               )}
                             </td>
-                            <td className="px-2 py-2 text-center" onClick={e => e.stopPropagation()}>
+                            <td className="px-2 py-1" onClick={e => e.stopPropagation()}>
                               <button
-                                onClick={() => deleteRow.mutate(rowFieldIds)}
-                                disabled={deleteRow.isPending}
-                                className="p-1 rounded text-muted-foreground hover:text-red-600 hover:bg-red-50 transition-colors"
-                                title="Delete row"
+                                onClick={() => {
+                                  const ids = tableColumnNames
+                                    .map(name => tableFieldGroups[name]?.[i])
+                                    .filter((f): f is ExtractedField => f !== undefined)
+                                    .filter(f => validatableFieldIds.includes(f.id))
+                                    .map(f => f.id);
+                                  validateRow(ids);
+                                }}
+                                disabled={tableColumnNames.some(name => {
+                                  const f = tableFieldGroups[name]?.[i];
+                                  return f ? pendingIds.has(f.id) : false;
+                                })}
+                                className="text-muted-foreground hover:text-foreground disabled:opacity-40"
+                                title="Validate this row"
                               >
-                                <Trash2 className="h-3.5 w-3.5" />
+                                {tableColumnNames.some(name => { const f = tableFieldGroups[name]?.[i]; return f ? pendingIds.has(f.id) : false; })
+                                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  : <RefreshCw className="h-3.5 w-3.5" />}
                               </button>
+                            </td>
+                            <td className="px-2 py-2 text-center" onClick={e => e.stopPropagation()}>
+                              {rowFieldIds[0] && deletingRowIds.has(rowFieldIds[0]) ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400 mx-auto" />
+                              ) : (
+                                <button
+                                  onClick={() => deleteRow.mutate(rowFieldIds)}
+                                  className="p-1 rounded text-muted-foreground hover:text-red-600 hover:bg-red-50 transition-colors"
+                                  title="Delete row"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              )}
                             </td>
                           </tr>
                         );
                       })}
                     </tbody>
                   </table>
+                  {totalPages > 1 && (
+                    <div className="border-t border-border px-3 py-2 flex items-center justify-between bg-muted/20">
+                      <span className="text-xs text-muted-foreground">
+                        Rows {pageStart + 1}–{pageEnd} of {tableRowCount}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setTablePage(p => Math.max(1, p - 1))}
+                          disabled={tablePage === 1}
+                          className="px-2 py-0.5 text-xs rounded border border-border bg-background text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          ← Prev
+                        </button>
+                        <span className="text-xs text-muted-foreground font-medium whitespace-nowrap">
+                          Page {tablePage} of {totalPages}
+                        </span>
+                        <button
+                          onClick={() => setTablePage(p => Math.min(totalPages, p + 1))}
+                          disabled={tablePage === totalPages}
+                          className="px-2 py-0.5 text-xs rounded border border-border bg-background text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          Next →
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="border-t border-border px-3 py-2">
+                    <button
+                      onClick={() => {
+                        const cols = tableConfigColumns.length > 0
+                          ? tableConfigColumns.map(c => ({ fieldName: c.fieldName, fieldMappingConfigId: c.id }))
+                          : tableColumnNames.map(name => ({ fieldName: name, fieldMappingConfigId: fieldConfigMap[name.toLowerCase()]?.id }));
+                        addTableRow.mutate(cols);
+                      }}
+                      disabled={addTableRow.isPending}
+                      className="flex items-center gap-1.5 text-xs text-primary hover:text-primary/80 disabled:opacity-50 transition-colors"
+                    >
+                      {addTableRow.isPending
+                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        : <PlusCircle className="h-3.5 w-3.5" />}
+                      Add Row
+                    </button>
+                  </div>
                 </div>
               </div>
             )}

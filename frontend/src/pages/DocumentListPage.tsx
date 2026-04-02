@@ -1,16 +1,18 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { documentApi, vendorApi, configApi } from '../api/client';
+import { documentApi, configApi, branchApi } from '../api/client';
 import StatusBadge from '../components/ui/StatusBadge';
 import { useAuth } from '../contexts/AuthContext';
-import type { PagedResult, Document, Vendor, DocumentType } from '../types';
+import type { PagedResult, Document, DocumentType } from '../types';
+
+interface Branch { id: string; branchCode: string; branchName: string; }
 import {
   Upload, Search, ChevronLeft, ChevronRight,
-  Trash2, Loader2, Download, Eye, Building2, X, MoreVertical, FileType, ChevronDown,
+  Trash2, Loader2, Download, Eye, Building2, X, MoreVertical, FileType, ChevronDown, AlertTriangle,
 } from 'lucide-react';
 
-const STATUS_OPTIONS = ['', 'Uploaded', 'Processing', 'PendingReview', 'Checked'];
+const STATUS_OPTIONS = ['', 'Uploaded', 'PendingProcess', 'Processing', 'PendingReview', 'Checked'];
 
 // Custom dropdown that always opens downward (avoids native <select> opening upward near bottom)
 function CustomSelect({ value, onChange, options, placeholder, icon: Icon, disabled }: {
@@ -79,10 +81,9 @@ export default function DocumentListPage() {
   const [page, setPage] = useState<number>(saved.page ?? 1);
   const [status, setStatus] = useState<string>(saved.status ?? '');
   const [docTypeId, setDocTypeId] = useState<string>(saved.docTypeId ?? '');
+  const [filterBranchId, setFilterBranchId] = useState<string>(saved.filterBranchId ?? '');
   const [search, setSearch] = useState<string>(saved.search ?? '');
   const [searchInput, setSearchInput] = useState<string>(saved.search ?? '');
-  const [vendorId, setVendorId] = useState<string>(saved.vendorId ?? '');
-  const [vendorInput, setVendorInput] = useState<string>(saved.vendorInput ?? '');
   const [groupByVendor, setGroupByVendor] = useState<boolean>(saved.groupByVendor ?? false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
@@ -90,16 +91,13 @@ export default function DocumentListPage() {
   // Mobile "..." menu — tracks which card's menu is open
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  // Vendor combobox
-  const [showVendorDrop, setShowVendorDrop] = useState(false);
-  const vendorComboRef = useRef<HTMLDivElement>(null);
 
   // Persist filters to sessionStorage whenever they change
   useEffect(() => {
     sessionStorage.setItem(FILTER_KEY, JSON.stringify(
-      { page, status, docTypeId, search, vendorId, vendorInput, groupByVendor }
+      { page, status, docTypeId, filterBranchId, search, groupByVendor }
     ));
-  }, [page, status, docTypeId, search, vendorId, vendorInput, groupByVendor]);
+  }, [page, status, docTypeId, filterBranchId, search, groupByVendor]);
 
   // Close "..." menu when clicking outside
   useEffect(() => {
@@ -111,22 +109,6 @@ export default function DocumentListPage() {
     if (openMenuId) document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [openMenuId]);
-
-  // Close vendor combobox when clicking outside
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (vendorComboRef.current && !vendorComboRef.current.contains(e.target as Node)) {
-        setShowVendorDrop(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  // Sync vendor input label when vendorId is cleared externally (e.g. via chip)
-  useEffect(() => {
-    if (!vendorId) setVendorInput('');
-  }, [vendorId]);
 
   const handlePreview = async (docId: string) => {
     setOpenMenuId(null);
@@ -161,30 +143,20 @@ export default function DocumentListPage() {
     return () => clearTimeout(t);
   }, [searchInput]);
 
-  const { isAdmin } = useAuth();
+  const { isAdmin, isManagerOrAbove } = useAuth();
   const queryClient = useQueryClient();
 
   const { data, isLoading } = useQuery<PagedResult<Document>>({
-    queryKey: ['documents', page, status, search, vendorId, docTypeId],
+    queryKey: ['documents', page, status, search, docTypeId, filterBranchId],
     queryFn: () => documentApi.list({
       page,
       pageSize: groupByVendor ? 100 : 20,
       status: status || undefined,
       search: search || undefined,
-      vendorId: vendorId || undefined,
       documentTypeId: docTypeId || undefined,
+      filterBranchId: filterBranchId || undefined,
     }).then(r => r.data),
     refetchInterval: 30000,
-  });
-
-  // Vendor list for filter dropdown (Manager+ only — gracefully empty if forbidden)
-  const { data: vendorData } = useQuery<PagedResult<Vendor>>({
-    queryKey: ['vendors-filter'],
-    queryFn: () => vendorApi.list({ pageSize: 500 }).then(r => r.data).catch(() => ({
-      items: [], totalCount: 0, page: 1, pageSize: 500,
-      totalPages: 0, hasNextPage: false, hasPreviousPage: false,
-    })),
-    staleTime: 60_000,
   });
 
   // Document types for filter
@@ -194,14 +166,13 @@ export default function DocumentListPage() {
     staleTime: 60_000,
   });
 
-  const vendors = vendorData?.items ?? [];
-
-  const filteredVendors = useMemo(() =>
-    vendorInput.trim()
-      ? vendors.filter(v => (v.vendorName ?? '').toLowerCase().includes(vendorInput.trim().toLowerCase()))
-      : vendors,
-    [vendors, vendorInput]
-  );
+  // Branches for filter (managers and admins only)
+  const { data: branches } = useQuery<Branch[]>({
+    queryKey: ['branches'],
+    queryFn: () => branchApi.list().then(r => r.data),
+    staleTime: 300_000,
+    enabled: isManagerOrAbove,
+  });
 
   const deleteDoc = useMutation({
     mutationFn: (id: string) => documentApi.delete(id),
@@ -222,27 +193,59 @@ export default function DocumentListPage() {
       groups[key].docs.push(doc);
     }
     return Object.entries(groups)
-      .sort(([a, { label: la }], [b, { label: lb }]) => {
-        if (a === '__no_vendor__') return 1;
-        if (b === '__no_vendor__') return -1;
-        return la.localeCompare(lb);
+      .sort(([a, { docs: da }], [b, { docs: db }]) => {
+        if (a === '__no_vendor__') return -1;
+        if (b === '__no_vendor__') return 1;
+        const latestA = Math.max(...da.map(d => new Date(d.uploadedAt).getTime()));
+        const latestB = Math.max(...db.map(d => new Date(d.uploadedAt).getTime()));
+        return latestB - latestA;
       })
       .map(([, { label, docs }]) => [label, docs] as [string, Document[]]);
   }, [groupByVendor, data?.items]);
 
-  const colSpan = isAdmin ? 8 : 7;
+  // When grouped, the vendor column is redundant (vendor shown in group header row).
+  const colSpan = groupByVendor ? (isAdmin ? 7 : 6) : (isAdmin ? 8 : 7);
+
+  // Fixed column widths applied via <colgroup> so all tables (and all vendor-group
+  // sub-tables) share identical column proportions regardless of row content.
+  const ColGroup = () => (
+    <colgroup>
+      {!groupByVendor && <col style={{ width: '14%' }} />}
+      <col style={{ width: groupByVendor ? '34%' : '28%' }} />
+      <col style={{ width: '14%' }} />
+      <col style={{ width: '10%' }} />
+      <col style={{ width: '12%' }} />
+      <col style={{ width: '10%' }} />
+      <col style={{ width: '8%' }} />
+      {isAdmin && <col style={{ width: '4%' }} />}
+    </colgroup>
+  );
 
   const DocRow = ({ doc }: { doc: Document }) => (
     <tr key={doc.id} className="hover:bg-muted/30">
+      {!groupByVendor && (
+        <td className="px-4 py-3">
+          {doc.vendorName
+            ? <span className="font-medium text-foreground">{doc.vendorName}</span>
+            : <span className="text-muted-foreground">—</span>}
+        </td>
+      )}
       <td className="px-4 py-3">
-        {doc.vendorName
-          ? <span className="font-medium text-foreground">{doc.vendorName}</span>
-          : <span className="text-muted-foreground">—</span>}
-      </td>
-      <td className="px-4 py-3">
-        <Link to={`/documents/${doc.id}`} className="text-primary hover:underline font-medium">
-          {doc.originalFilename}
-        </Link>
+        <div className="flex items-center gap-1.5">
+          <Link to={`/documents/${doc.id}`} className="text-primary hover:underline font-medium">
+            {doc.originalFilename}
+          </Link>
+          {doc.reuploadRequired && (
+            <span title="Re-upload required">
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-500 flex-shrink-0" />
+            </span>
+          )}
+          {doc.isValidating && (
+            <span title="Validation in progress">
+              <Loader2 className="h-3.5 w-3.5 text-blue-500 animate-spin flex-shrink-0" />
+            </span>
+          )}
+        </div>
       </td>
       <td className="px-4 py-3 text-muted-foreground">{doc.documentTypeName ?? '—'}</td>
       <td className="px-4 py-3"><StatusBadge status={doc.status} /></td>
@@ -285,7 +288,7 @@ export default function DocumentListPage() {
   const TableHead = () => (
     <thead className="bg-muted/50 border-b border-border">
       <tr>
-        <th className="px-4 py-3 text-left font-medium text-muted-foreground">Vendor</th>
+        {!groupByVendor && <th className="px-4 py-3 text-left font-medium text-muted-foreground">Vendor</th>}
         <th className="px-4 py-3 text-left font-medium text-muted-foreground">Filename</th>
         <th className="px-4 py-3 text-left font-medium text-muted-foreground">Type</th>
         <th className="px-4 py-3 text-left font-medium text-muted-foreground">Status</th>
@@ -301,7 +304,17 @@ export default function DocumentListPage() {
     <div className="card overflow-visible relative">
       <div className="flex items-start gap-2 p-3">
         <Link to={`/documents/${doc.id}`} className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-foreground leading-snug truncate">{doc.originalFilename}</p>
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm font-medium text-foreground leading-snug truncate">{doc.originalFilename}</p>
+            {doc.reuploadRequired && (
+              <span title="Re-upload required"><AlertTriangle className="h-3.5 w-3.5 text-amber-500 flex-shrink-0" /></span>
+            )}
+            {doc.isValidating && (
+              <span title="Validation in progress">
+                <Loader2 className="h-3.5 w-3.5 text-blue-500 animate-spin flex-shrink-0" />
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-1.5 mt-1 flex-wrap">
             <StatusBadge status={doc.status} />
             {doc.documentTypeName && (
@@ -345,7 +358,7 @@ export default function DocumentListPage() {
     </div>
   );
 
-  const activeFiltersCount = [status, search, vendorId, docTypeId].filter(Boolean).length;
+  const activeFiltersCount = [status, search, docTypeId, filterBranchId].filter(Boolean).length;
 
   return (
     <div className="space-y-4">
@@ -371,8 +384,22 @@ export default function DocumentListPage() {
           />
         </div>
 
-        {/* Filter row — 2 cols on mobile, 3 equal cols on desktop */}
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+        {/* Filter row */}
+        <div className={`grid gap-2 ${isManagerOrAbove ? 'grid-cols-2 sm:grid-cols-3' : 'grid-cols-2'}`}>
+          {/* Branch filter — managers and admins only */}
+          {isManagerOrAbove && (
+            <CustomSelect
+              value={filterBranchId}
+              onChange={v => { setFilterBranchId(v); setPage(1); }}
+              placeholder="All branches"
+              icon={Building2}
+              options={[
+                { value: '', label: 'All branches' },
+                ...(branches ?? []).map(b => ({ value: b.id, label: b.branchName })),
+              ]}
+            />
+          )}
+
           {/* Status */}
           <CustomSelect
             value={status}
@@ -393,52 +420,6 @@ export default function DocumentListPage() {
               ...(docTypes ?? []).map(dt => ({ value: dt.id, label: dt.displayName })),
             ]}
           />
-
-          {/* Vendor — typeahead combobox */}
-          <div className="relative col-span-2 md:col-span-1" ref={vendorComboRef}>
-            <Building2 className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none z-10" />
-            <input
-              className="input text-sm pl-8 w-full pr-7"
-              placeholder="All vendors"
-              value={vendorInput}
-              disabled={vendors.length === 0}
-              onChange={e => {
-                setVendorInput(e.target.value);
-                setVendorId('');
-                setShowVendorDrop(true);
-                setPage(1);
-              }}
-              onFocus={() => setShowVendorDrop(true)}
-            />
-            {vendorInput && (
-              <button
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                onClick={() => { setVendorInput(''); setVendorId(''); setPage(1); setShowVendorDrop(false); }}
-                tabIndex={-1}
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
-            {showVendorDrop && filteredVendors.length > 0 && (
-              <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg shadow-lg max-h-52 overflow-y-auto">
-                {filteredVendors.map(v => (
-                  <button
-                    key={v.id}
-                    className={`flex items-center w-full px-3 py-2 text-sm hover:bg-muted transition-colors text-left ${v.id === vendorId ? 'text-primary font-medium bg-primary/5' : 'text-foreground'}`}
-                    onMouseDown={e => e.preventDefault()}
-                    onClick={() => {
-                      setVendorId(v.id);
-                      setVendorInput(v.vendorName ?? '');
-                      setShowVendorDrop(false);
-                      setPage(1);
-                    }}
-                  >
-                    {v.vendorName}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
         </div>
 
         {/* Group toggle + active filter chips */}
@@ -455,6 +436,12 @@ export default function DocumentListPage() {
 
           {activeFiltersCount > 0 && (
             <div className="flex items-center gap-1.5 flex-wrap">
+              {filterBranchId && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-primary/10 text-primary">
+                  {branches?.find(b => b.id === filterBranchId)?.branchName ?? 'Branch'}
+                  <button onClick={() => setFilterBranchId('')}><X className="h-3 w-3" /></button>
+                </span>
+              )}
               {status && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-primary/10 text-primary">
                   {status}
@@ -473,12 +460,6 @@ export default function DocumentListPage() {
                   <button onClick={() => { setSearch(''); setSearchInput(''); }}><X className="h-3 w-3" /></button>
                 </span>
               )}
-              {vendorId && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-primary/10 text-primary">
-                  {vendors.find(v => v.id === vendorId)?.vendorName ?? 'Vendor'}
-                  <button onClick={() => setVendorId('')}><X className="h-3 w-3" /></button>
-                </span>
-              )}
             </div>
           )}
         </div>
@@ -487,23 +468,30 @@ export default function DocumentListPage() {
       {/* ── Desktop table ────────────────────────────────────────────────── */}
       <div className="card hidden md:block overflow-x-auto">
         {groupByVendor && groupedItems ? (
-          groupedItems.map(([vendorGroup, docs]) => (
-            <div key={vendorGroup}>
-              <div className="flex items-center gap-2 px-4 py-2 bg-muted/60 border-b border-border">
-                <Building2 className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm font-semibold text-foreground">{vendorGroup}</span>
-                <span className="text-xs text-muted-foreground ml-1">({docs.length})</span>
-              </div>
-              <table className="w-full text-sm">
-                <TableHead />
-                <tbody className="divide-y divide-border">
+          // Single table so all vendor groups share identical fixed column widths.
+          <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+            <ColGroup />
+            <TableHead />
+            <tbody className="divide-y divide-border">
+              {groupedItems.map(([vendorGroup, docs]) => (
+                <>
+                  <tr key={`hdr-${vendorGroup}`} className="bg-muted/60 border-b border-border">
+                    <td colSpan={colSpan} className="px-4 py-2">
+                      <span className="flex items-center gap-2">
+                        <Building2 className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                        <span className="text-sm font-semibold text-foreground">{vendorGroup}</span>
+                        <span className="text-xs text-muted-foreground">({docs.length})</span>
+                      </span>
+                    </td>
+                  </tr>
                   {docs.map(doc => <DocRow key={doc.id} doc={doc} />)}
-                </tbody>
-              </table>
-            </div>
-          ))
+                </>
+              ))}
+            </tbody>
+          </table>
         ) : (
-          <table className="w-full text-sm">
+          <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+            <ColGroup />
             <TableHead />
             <tbody className="divide-y divide-border">
               {isLoading && (
@@ -569,11 +557,14 @@ export default function DocumentListPage() {
         </div>
       )}
 
-      {/* Pagination (only in flat view) */}
-      {!groupByVendor && data && data.totalPages > 1 && (
+      {/* Pagination */}
+      {data && data.totalPages > 1 && (
         <div className="flex items-center justify-between">
           <p className="text-sm text-muted-foreground">
-            Showing {(page - 1) * 20 + 1}–{Math.min(page * 20, data.totalCount)} of {data.totalCount}
+            {(() => {
+              const ps = groupByVendor ? 100 : 20;
+              return `Showing ${(page - 1) * ps + 1}–${Math.min(page * ps, data.totalCount)} of ${data.totalCount}`;
+            })()}
           </p>
           <div className="flex gap-2">
             <button className="btn-secondary p-2" disabled={!data.hasPreviousPage} onClick={() => setPage(p => p - 1)}>

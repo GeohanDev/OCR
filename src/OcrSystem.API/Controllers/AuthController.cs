@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using OcrSystem.Application.Auth;
+using OcrSystem.Application.ERP;
 using OcrSystem.Domain.Entities;
 using OcrSystem.Domain.Enums;
 using OcrSystem.Infrastructure.Persistence.Repositories;
@@ -32,6 +33,46 @@ public class AuthController : ControllerBase
             role = ctx.Role,
             branchId = ctx.BranchId,
         });
+    }
+
+    /// <summary>
+    /// Keepalive endpoint: verifies the forwarded Acumatica token is still valid and
+    /// extends the backend inactivity window.
+    /// Called by the frontend every ~2 minutes while the user is active.
+    /// Returns 200 { active: true } on success, 424 when the Acumatica session has expired.
+    /// </summary>
+    [HttpGet("acumatica/keepalive")]
+    [Authorize]
+    public async Task<IActionResult> AcumaticaKeepalive(
+        [FromServices] IErpIntegrationService erp,
+        [FromServices] IAcumaticaSessionService sessionService,
+        [FromServices] IAcumaticaTokenContext tokenContext,
+        [FromServices] ICurrentUserContext currentUser,
+        CancellationToken ct)
+    {
+        if (currentUser.UserId == Guid.Empty)
+            return Unauthorized();
+
+        // Clear the timed-out flag so PingAsync is allowed to proceed.
+        // If the Acumatica token is genuinely expired, PingAsync will throw AcumaticaAuthException.
+        tokenContext.SessionTimedOut = false;
+
+        try
+        {
+            var ok = await erp.PingAsync(ct);
+            if (ok)
+            {
+                sessionService.StartSession(currentUser.UserId);
+                return Ok(new { active = true });
+            }
+            // Ping returned non-success without throwing (e.g. 5xx from Acumatica)
+            return StatusCode(503, new { error = "acumatica_unavailable" });
+        }
+        catch (AcumaticaAuthException)
+        {
+            sessionService.EndSession(currentUser.UserId);
+            return StatusCode(424, new { error = "acumatica_session_expired" });
+        }
     }
 
     [HttpPost("callback")]

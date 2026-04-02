@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { usersApi } from '../../api/client';
+import { usersApi, branchApi } from '../../api/client';
 import { useAuth } from '../../contexts/AuthContext';
 import type { User, PagedResult } from '../../types';
 import { RefreshCw, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
 
 const ROLES = ['Normal', 'Manager', 'Admin'] as const;
+
+interface Branch { id: string; branchCode: string; branchName: string; }
 
 export default function UserManagementPage() {
   const queryClient = useQueryClient();
@@ -18,12 +20,19 @@ export default function UserManagementPage() {
     queryFn: () => usersApi.list({ page, pageSize: 20 }).then(r => r.data),
   });
 
+  const { data: branches } = useQuery<Branch[]>({
+    queryKey: ['branches'],
+    queryFn: () => branchApi.list().then(r => r.data),
+    staleTime: 300_000,
+  });
+
   const sync = useMutation({
     mutationFn: () => usersApi.sync(),
     onSuccess: (res) => {
       const { created, updated, deactivated } = res.data;
       setSyncResult(`Sync complete: ${created} created, ${updated} updated, ${deactivated} deactivated`);
       queryClient.invalidateQueries({ queryKey: ['users'] });
+      queryClient.invalidateQueries({ queryKey: ['branches'] });
       setTimeout(() => setSyncResult(null), 5000);
     },
   });
@@ -31,6 +40,12 @@ export default function UserManagementPage() {
   const updateRole = useMutation({
     mutationFn: ({ userId, role }: { userId: string; role: string }) =>
       usersApi.updateRole(userId, role),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+
+  const updateBranch = useMutation({
+    mutationFn: ({ userId, branchId }: { userId: string; branchId: string | null }) =>
+      usersApi.updateBranch(userId, branchId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] }),
   });
 
@@ -82,7 +97,25 @@ export default function UserManagementPage() {
                   <p className="text-xs text-gray-500">{user.email}</p>
                 </td>
                 <td className="px-4 py-3 text-gray-600 font-mono text-xs">{user.username}</td>
-                <td className="px-4 py-3 text-gray-600">{user.branchName ?? '—'}</td>
+                <td className="px-4 py-3">
+                  {isAdmin ? (
+                    <select
+                      className="input py-1 text-sm w-auto min-w-[160px]"
+                      value={user.branchId ?? ''}
+                      onChange={e => updateBranch.mutate({
+                        userId: user.id,
+                        branchId: e.target.value || null,
+                      })}
+                    >
+                      <option value="">All Branches</option>
+                      {(branches ?? []).map(b => (
+                        <option key={b.id} value={b.id}>{b.branchName}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="text-gray-600">{user.branchName ?? 'All Branches'}</span>
+                  )}
+                </td>
                 <td className="px-4 py-3">
                   {isAdmin ? (
                     <select

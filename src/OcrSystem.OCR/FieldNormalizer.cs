@@ -15,37 +15,67 @@ public class FieldNormalizer : IFieldNormalizer
         if (string.IsNullOrWhiteSpace(rawValue)) return null;
         var trimmed = rawValue.Trim();
 
-        // Detect date fields by ERP key or by field name containing "date".
+        // ── Date detection ────────────────────────────────────────────────────
+        // Match by exact ERP key, or if the field name/key contains "date".
         bool isDateField =
-            erpMappingKey?.ToUpperInvariant() is "DATE" or "STATEMENTDATE" ||
-            (fieldName?.IndexOf("date", StringComparison.OrdinalIgnoreCase) >= 0);
+            erpMappingKey?.IndexOf("date", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            fieldName?.IndexOf("date",     StringComparison.OrdinalIgnoreCase) >= 0;
 
         if (isDateField) return NormalizeDate(trimmed);
 
-        var normalized = erpMappingKey?.ToUpperInvariant() switch
-        {
-            "VENDORID" => trimmed.ToUpperInvariant().Replace(" ", ""),
-            "CURRENCYID" => trimmed.ToUpperInvariant().Trim(),
-            "BRANCHID" => trimmed.ToUpperInvariant().Trim(),
-            "PONUMBER" or "PURCHASEORDER" => trimmed.Replace(" ", "").ToUpperInvariant(),
-            "AMOUNT" or "TOTALAMOUNT" => NormalizeAmount(trimmed),
-            _ => trimmed
-        };
+        // ── Amount detection ──────────────────────────────────────────────────
+        // Match by exact ERP key, or if the field name/key contains common amount words.
+        bool isAmountField =
+            IsAmountKey(erpMappingKey) ||
+            IsAmountName(fieldName);
 
-        // Apply company-name normalization to any vendor/company name field.
-        // Removes dots from Malaysian company suffixes: SDN. BHD. → SDN BHD,
-        // PLT. → PLT, BHD. → BHD, etc.
+        if (isAmountField) return NormalizeAmount(trimmed);
+
+        // ── ID / code fields ──────────────────────────────────────────────────
+        var erpUpper = erpMappingKey?.ToUpperInvariant();
+        if (erpUpper is "VENDORID")
+            return trimmed.ToUpperInvariant().Replace(" ", "");
+        if (erpUpper is "CURRENCYID" or "BRANCHID")
+            return trimmed.ToUpperInvariant().Trim();
+        if (erpUpper is "PONUMBER" or "PURCHASEORDER")
+            return trimmed.Replace(" ", "").ToUpperInvariant();
+
+        var normalized = trimmed;
+
+        // ── Company name normalization ────────────────────────────────────────
         bool isVendorNameField =
-            erpMappingKey?.IndexOf("vendor", StringComparison.OrdinalIgnoreCase) >= 0 ||
-            erpMappingKey?.IndexOf("company", StringComparison.OrdinalIgnoreCase) >= 0 ||
-            fieldName?.IndexOf("vendor", StringComparison.OrdinalIgnoreCase) >= 0 ||
-            fieldName?.IndexOf("company", StringComparison.OrdinalIgnoreCase) >= 0 ||
-            fieldName?.IndexOf("supplier", StringComparison.OrdinalIgnoreCase) >= 0;
+            erpMappingKey?.IndexOf("vendor",   StringComparison.OrdinalIgnoreCase) >= 0 ||
+            erpMappingKey?.IndexOf("company",  StringComparison.OrdinalIgnoreCase) >= 0 ||
+            fieldName?.IndexOf("vendor",       StringComparison.OrdinalIgnoreCase) >= 0 ||
+            fieldName?.IndexOf("company",      StringComparison.OrdinalIgnoreCase) >= 0 ||
+            fieldName?.IndexOf("supplier",     StringComparison.OrdinalIgnoreCase) >= 0;
 
         if (isVendorNameField)
             normalized = NormalizeCompanyName(normalized);
 
         return normalized;
+    }
+
+    // Returns true when the ERP mapping key looks like an amount field
+    // (exact match on common keys, or contains amount-related words).
+    private static bool IsAmountKey(string? key)
+    {
+        if (key is null) return false;
+        var k = key.ToUpperInvariant();
+        // Exact legacy keys kept for backwards compatibility
+        if (k is "AMOUNT" or "TOTALAMOUNT") return true;
+        // Suffix/contains match for compound keys (e.g. "APAging:InvoiceAmount", "OpenBalance")
+        return k.Contains("AMOUNT") || k.Contains("BALANCE") || k.Contains("TOTAL")
+            || k.Contains("PRICE") || k.Contains("VALUE");
+    }
+
+    // Returns true when the field name looks like an amount field.
+    private static bool IsAmountName(string? name)
+    {
+        if (name is null) return false;
+        var n = name.ToUpperInvariant();
+        return n.Contains("AMOUNT") || n.Contains("BALANCE") || n.Contains("TOTAL")
+            || n.Contains("PRICE")  || n.Contains("VALUE")   || n.Contains("AMT");
     }
 
     // Normalises Malaysian/Singapore company name suffixes:
@@ -65,7 +95,10 @@ public class FieldNormalizer : IFieldNormalizer
             m => m.Value.TrimEnd('.'),
             RegexOptions.IgnoreCase);
 
-        // Collapse "SDN BHD" variants — handles "SDN.BHD" leftover after first pass
+        // "SDNBHD" (no separator — OCR merges the two words) → "SDN BHD"
+        result = Regex.Replace(result, @"\bSDNBHD\b", "SDN BHD", RegexOptions.IgnoreCase);
+
+        // Collapse "SDN.BHD" leftover after first pass → "SDN BHD"
         result = Regex.Replace(result, @"\bSDN\.BHD\b", "SDN BHD", RegexOptions.IgnoreCase);
 
         // Collapse multiple spaces
@@ -117,9 +150,15 @@ public class FieldNormalizer : IFieldNormalizer
 
     private static string NormalizeAmount(string raw)
     {
+        // "CR" or "(CR)" suffix means credit — treat as negative.
+        bool isCr = Regex.IsMatch(raw, @"\bCR\b|\(CR\)", RegexOptions.IgnoreCase);
+        // Strip everything except digits, dot, comma, and leading minus.
         var cleaned = Regex.Replace(raw, @"[^\d.,\-]", "").Replace(",", "");
         if (decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out var amount))
+        {
+            if (isCr) amount = -Math.Abs(amount);
             return amount.ToString("F2", CultureInfo.InvariantCulture);
+        }
         return raw;
     }
 }

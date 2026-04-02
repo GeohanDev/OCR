@@ -7,6 +7,9 @@ obj/
 *.nupkg
 *.snupkg
 
+# Secrets (use appsettings.Development.json locally)
+appsettings.Development.json
+
 # Environment
 .env
 .env.local

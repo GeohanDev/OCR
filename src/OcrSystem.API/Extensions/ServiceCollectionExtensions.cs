@@ -8,6 +8,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using OcrSystem.Application.Audit;
 using OcrSystem.Application.Auth;
+using OcrSystem.Application.CashFlow;
 using OcrSystem.Application.Config;
 using OcrSystem.Application.Dashboard;
 using OcrSystem.Application.Documents;
@@ -18,7 +19,6 @@ using OcrSystem.Application.Storage;
 using OcrSystem.Application.Trash;
 using OcrSystem.Application.Validation;
 using OcrSystem.Infrastructure.Auth;
-using OcrSystem.Application.Auth;
 using OcrSystem.Infrastructure.ERP;
 using OcrSystem.Infrastructure.Trash;
 using OcrSystem.Infrastructure.Persistence;
@@ -51,6 +51,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<BranchRepository>();
         services.AddScoped<SystemConfigRepository>();
         services.AddScoped<VendorRepository>();
+        services.AddScoped<ValidationQueueRepository>();
 
         // Application Services
         services.AddScoped<IDocumentService, DocumentService>();
@@ -61,6 +62,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IUserSyncService, UserSyncService>();
         services.AddScoped<IVendorSyncService, VendorSyncService>();
         services.AddScoped<ITrashPurgeService, TrashPurgeService>();
+        services.AddSingleton<ICaptureProgressTracker, CaptureProgressTracker>();
+        services.AddScoped<IAgingSnapshotService, AgingSnapshotService>();
 
         // Storage
         services.AddScoped<IFileStorageService, LocalFileStorageService>();
@@ -75,11 +78,17 @@ public static class ServiceCollectionExtensions
         // Auth context
         services.AddScoped<ICurrentUserContext, CurrentUserContext>();
 
+        // Acumatica session tracking (inactivity timeout)
+        services.AddMemoryCache();
+        services.AddSingleton<IAcumaticaSessionService, AcumaticaSessionService>();
+
         // Validation
+        services.AddSingleton<IValidationCancellationService, ValidationCancellationService>();
         services.AddScoped<IValidationService, ValidationService>();
         services.AddSingleton<IOwnCompanyService, OwnCompanyService>();
         services.AddScoped<IVendorResolutionContext, VendorResolutionContext>();
         services.AddScoped<IValidationFieldContext, ValidationFieldContext>();
+        services.AddScoped<IErpInvoiceContext, ErpInvoiceContext>();
         services.AddScoped<IFieldValidator, RequiredFieldValidator>();
         services.AddScoped<IFieldValidator, ErpVendorValidator>();
         services.AddScoped<IFieldValidator, ErpVendorNameValidator>();
@@ -97,6 +106,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IFieldNormalizer, FieldNormalizer>();
         services.AddScoped<IConfidenceScorer, ConfidenceScorer>();
         services.AddScoped<IOcrService, Infrastructure.OCR.OcrPipelineService>();
+        services.AddScoped<OcrJobDispatcher>();
+        services.AddScoped<ValidationJobDispatcher>();
 
         // Step 3: PaddleOCR microservice client.
         // Enabled when PaddleOcr:BaseUrl is set (e.g. http://paddleocr:8001).
@@ -123,9 +134,14 @@ public static class ServiceCollectionExtensions
         // Memory cache for ERP lookups
         services.AddMemoryCache();
 
-        // Hangfire
+        // Hangfire — 2 workers allow two documents to be OCR-processed simultaneously.
+        // All OCR services are Scoped so each job gets its own DbContext, HttpClient,
+        // and token context — no shared mutable state between concurrent jobs.
+        // Keep at 2 (not 3+): PaddleOCR is CPU-bound and a third concurrent large PDF
+        // job risks hitting the 3-minute PaddleOCR HttpClient timeout.
+        var workerCount = config.GetValue<int>("Hangfire:WorkerCount", defaultValue: 2);
         services.AddHangfire(cfg => cfg.UsePostgreSqlStorage(config.GetConnectionString("Default")));
-        services.AddHangfireServer();
+        services.AddHangfireServer(opt => opt.WorkerCount = workerCount);
 
         return services;
     }

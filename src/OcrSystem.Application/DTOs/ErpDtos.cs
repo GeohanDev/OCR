@@ -27,7 +27,8 @@ public record OpenBillDto(
     decimal Balance,
     decimal Amount,
     DateTimeOffset? DueDate,
-    string Status);
+    string Status,
+    string VendorId = "");
 public record CurrencyDto(string CurrencyCode, string Description, bool IsActive);
 public record BranchDto(string BranchId, string BranchCode, string BranchName, bool IsActive);
 public record PurchaseOrderDto(string PoNumber, string VendorId, decimal Amount, string Status);

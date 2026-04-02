@@ -32,6 +32,17 @@ public class Document
     /// <summary>Denormalized vendor name for quick display without a join.</summary>
     public string? VendorName { get; set; }
 
+    /// <summary>
+    /// Set to true when the document scan quality is too poor for reliable OCR,
+    /// or when OCR fails to extract any content (confidence = 0).
+    /// Prompts the user to re-upload a clearer copy.
+    /// Cleared automatically when a new version is uploaded.
+    /// </summary>
+    public bool ReuploadRequired { get; set; } = false;
+
+    /// <summary>True while the frontend is running the per-field sequential validation loop.</summary>
+    public bool IsValidating { get; set; } = false;
+
     public DocumentType? DocumentType { get; set; }
     public User? UploadedByUser { get; set; }
     public Branch? Branch { get; set; }

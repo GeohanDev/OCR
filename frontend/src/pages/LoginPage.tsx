@@ -1,15 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { apiClient } from '../api/client';
-import { FileText, Loader2 } from 'lucide-react';
+import { FileText } from 'lucide-react';
 
 export default function LoginPage() {
-  const { isAuthenticated, isLoading, login } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const [demoLoading, setDemoLoading] = useState(false);
-  const [demoError, setDemoError] = useState('');
 
   const authError = searchParams.get('error');
   const authErrorMessages: Record<string, string> = {
@@ -26,20 +23,6 @@ export default function LoginPage() {
       navigate('/dashboard', { replace: true });
     }
   }, [isAuthenticated, isLoading, navigate]);
-
-  const handleDemoLogin = async () => {
-    setDemoLoading(true);
-    setDemoError('');
-    try {
-      const res = await apiClient.post('/auth/demo-login');
-      await login(res.data.accessToken);
-      navigate('/dashboard', { replace: true });
-    } catch {
-      setDemoError('Demo sign-in failed. Please check that the API is running.');
-    } finally {
-      setDemoLoading(false);
-    }
-  };
 
   const handleAcumaticaLogin = () => {
     const clientId = import.meta.env.VITE_ACUMATICA_CLIENT_ID ?? '';
@@ -80,34 +63,9 @@ export default function LoginPage() {
           </div>
         )}
 
-        {/* Demo sign-in error */}
-        {demoError && (
-          <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3 text-left">
-            {demoError}
-          </div>
-        )}
-
-        {/* Primary: demo login (always works in this deployment) */}
-        <button
-          onClick={handleDemoLogin}
-          disabled={demoLoading}
-          className="btn-primary w-full py-3 text-base flex items-center justify-center gap-2"
-        >
-          {demoLoading && <Loader2 className="h-4 w-4 animate-spin" />}
-          Sign In
-        </button>
-
-        {/* Divider */}
-        <div className="flex items-center gap-3">
-          <div className="flex-1 h-px bg-gray-200" />
-          <span className="text-xs text-gray-400">or</span>
-          <div className="flex-1 h-px bg-gray-200" />
-        </div>
-
-        {/* Secondary: Acumatica OAuth (for live deployments) */}
         <button
           onClick={handleAcumaticaLogin}
-          className="btn-secondary w-full py-2.5 text-sm"
+          className="btn-primary w-full py-3 text-base"
         >
           Sign in with Acumatica
         </button>

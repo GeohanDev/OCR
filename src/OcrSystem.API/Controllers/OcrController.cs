@@ -1,8 +1,12 @@
+using Hangfire;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using OcrSystem.Application.Auth;
 using OcrSystem.Application.OCR;
 using OcrSystem.Application.Validation;
+using OcrSystem.Domain.Enums;
+using OcrSystem.Infrastructure.OCR;
+using OcrSystem.Infrastructure.Persistence.Repositories;
 
 namespace OcrSystem.API.Controllers;
 
@@ -14,35 +18,34 @@ public class OcrController : ControllerBase
     private readonly IOcrService _ocr;
     private readonly IValidationService _validation;
     private readonly ICurrentUserContext _user;
+    private readonly IBackgroundJobClient _jobs;
+    private readonly DocumentRepository _docRepo;
 
-    public OcrController(IOcrService ocr, IValidationService validation, ICurrentUserContext user)
+    public OcrController(IOcrService ocr, IValidationService validation, ICurrentUserContext user, IBackgroundJobClient jobs, DocumentRepository docRepo)
     {
-        _ocr = ocr;
+        _ocr        = ocr;
         _validation = validation;
-        _user = user;
+        _user       = user;
+        _jobs       = jobs;
+        _docRepo    = docRepo;
     }
 
     [HttpPost("{documentId:guid}/process")]
-    public IActionResult Process(Guid documentId, [FromServices] IServiceScopeFactory scopeFactory)
+    public async Task<IActionResult> Process(Guid documentId, CancellationToken ct)
     {
-        // Fire-and-forget: return 202 immediately so the frontend is never blocked.
-        // A new DI scope is created for the background work so services are not
-        // accessed after the request scope is disposed.
-        _ = Task.Run(async () =>
+        // Mark as PendingProcess immediately so the UI shows the document is queued
+        // before Hangfire picks it up and sets it to Processing.
+        var doc = await _docRepo.GetByIdAsync(documentId, ct);
+        if (doc is not null && doc.Status != DocumentStatus.Processing)
         {
-            using var scope = scopeFactory.CreateScope();
-            var ocr = scope.ServiceProvider.GetRequiredService<IOcrService>();
-            var validation = scope.ServiceProvider.GetRequiredService<IValidationService>();
-            try
-            {
-                await ocr.ProcessDocumentAsync(documentId, CancellationToken.None);
-                await validation.ValidateDocumentAsync(documentId, CancellationToken.None);
-            }
-            catch
-            {
-                // Errors are already handled inside the service (document status set to Failed).
-            }
-        });
+            doc.Status = DocumentStatus.PendingProcess;
+            await _docRepo.UpdateAsync(doc, ct);
+        }
+
+        // Enqueue into Hangfire so jobs run one at a time (WorkerCount = 1).
+        // Returns 202 immediately; the job is persisted in PostgreSQL and
+        // will not be lost even if the container restarts mid-queue.
+        _jobs.Enqueue<OcrJobDispatcher>(d => d.ProcessAsync(documentId));
         return Accepted();
     }
 
@@ -91,6 +94,41 @@ public class OcrController : ControllerBase
         }
     }
 
+    [HttpPost("{documentId:guid}/re-extract")]
+    public async Task<IActionResult> ReExtractFields(Guid documentId, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _ocr.ReExtractFieldsAsync(documentId, ct);
+            return Ok(result);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpPost("{documentId:guid}/table-row")]
+    public async Task<IActionResult> AddTableRow(Guid documentId, [FromBody] AddTableRowRequest request, CancellationToken ct)
+    {
+        try
+        {
+            var columns = request.Columns
+                .Select(c => new OcrSystem.Application.OCR.AddTableRowColumn(c.FieldName, c.FieldMappingConfigId))
+                .ToList();
+            var fields = await _ocr.AddTableRowAsync(documentId, columns, ct);
+            return Ok(fields);
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound("No OCR result found for this document.");
+        }
+    }
+
     [HttpPatch("{documentId:guid}/fields/{fieldId:guid}")]
     public async Task<IActionResult> CorrectField(Guid documentId, Guid fieldId, [FromBody] CorrectFieldRequest request, CancellationToken ct)
     {
@@ -107,3 +145,5 @@ public class OcrController : ControllerBase
 }
 
 public record CorrectFieldRequest(string CorrectedValue);
+public record AddTableRowRequest(IReadOnlyList<AddTableRowColumnDto> Columns);
+public record AddTableRowColumnDto(string FieldName, Guid? FieldMappingConfigId);

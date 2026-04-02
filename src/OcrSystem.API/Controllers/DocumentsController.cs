@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using OcrSystem.Application.Auth;
 using OcrSystem.Application.Commands;
 using OcrSystem.Application.Documents;
+using OcrSystem.Infrastructure.Persistence.Repositories;
 
 namespace OcrSystem.API.Controllers;
 
@@ -55,13 +56,16 @@ public class DocumentsController : ControllerBase
         [FromQuery] DateTimeOffset? to,
         [FromQuery] Guid? vendorId,
         [FromQuery] Guid? documentTypeId,
+        [FromQuery] string? vendorName,
+        [FromQuery] Guid? filterBranchId,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         CancellationToken ct = default)
     {
         var query = new DocumentListQuery(
             _user.UserId, _user.Role, _user.BranchId,
-            status, search, from, to, page, pageSize, vendorId, documentTypeId);
+            status, search, from, to, page, pageSize, vendorId, documentTypeId, vendorName,
+            filterBranchId);
         var result = await _documents.ListAsync(query, ct);
         return Ok(result);
     }
@@ -120,6 +124,42 @@ public class DocumentsController : ControllerBase
         if (!result.IsSuccess) return BadRequest(result.Error);
         return Ok(result.Value);
     }
+
+    /// <summary>
+    /// Sets or clears the ReuploadRequired flag on a document.
+    /// Managers and above can flag any document; normal users can only flag their own.
+    /// </summary>
+    [HttpPatch("{id:guid}/reupload-required")]
+    public async Task<IActionResult> SetReuploadRequired(
+        Guid id,
+        [FromBody] SetReuploadRequiredRequest request,
+        [FromServices] DocumentRepository docRepo,
+        CancellationToken ct)
+    {
+        var doc = await docRepo.GetByIdAsync(id, ct);
+        if (doc is null) return NotFound();
+
+        bool isManagerOrAbove = _user.Role is "Manager" or "Admin";
+        if (!isManagerOrAbove && doc.UploadedBy != _user.UserId)
+            return Forbid();
+
+        doc.ReuploadRequired = request.Required;
+        await docRepo.UpdateAsync(doc, ct);
+        return NoContent();
+    }
+
+    [HttpPatch("{id:guid}/validating")]
+    public async Task<IActionResult> SetValidating(
+        Guid id,
+        [FromBody] SetValidatingRequest request,
+        [FromServices] DocumentRepository docRepo,
+        CancellationToken ct)
+    {
+        var doc = await docRepo.GetByIdAsync(id, ct);
+        if (doc is null) return NotFound();
+        await docRepo.SetValidatingAsync(id, request.IsValidating, ct);
+        return NoContent();
+    }
 }
 
 public record UploadDocumentRequest(
@@ -131,3 +171,7 @@ public record UpdateStatusRequest(string Status, string? Notes);
 public record AddVersionRequest([FromForm] IFormFile? File);
 
 public record AssignDocumentTypeRequest(Guid? DocumentTypeId);
+
+public record SetReuploadRequiredRequest(bool Required);
+
+public record SetValidatingRequest(bool IsValidating);

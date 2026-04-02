@@ -20,4 +20,6 @@ public record DocumentDto(
     string? Notes,
     int CurrentVersion,
     Guid? VendorId = null,
-    string? VendorName = null);
+    string? VendorName = null,
+    bool ReuploadRequired = false,
+    bool IsValidating = false);

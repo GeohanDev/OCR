@@ -51,6 +51,8 @@ export interface Document {
   versions?: DocumentVersion[];
   vendorId?: string;
   vendorName?: string;
+  reuploadRequired?: boolean;
+  isValidating?: boolean;
 }
 
 export interface DocumentVersion {
@@ -64,6 +66,7 @@ export interface DocumentVersion {
 
 export type DocumentStatus =
   | 'Uploaded'
+  | 'PendingProcess'
   | 'Processing'
   | 'PendingReview'
   | 'ReviewInProgress'

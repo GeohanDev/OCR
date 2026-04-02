@@ -15,16 +15,18 @@ public class DynamicErpValidator : IFieldValidator
     private readonly IVendorResolutionContext _vendorContext;
     private readonly IValidationFieldContext _fieldContext;
     private readonly IOwnCompanyService _ownCompany;
+    private readonly IErpInvoiceContext _invoiceContext;
     private readonly ILogger<DynamicErpValidator> _logger;
 
     public DynamicErpValidator(IErpIntegrationService erp, IVendorResolutionContext vendorContext,
         IValidationFieldContext fieldContext, IOwnCompanyService ownCompany,
-        ILogger<DynamicErpValidator> logger)
+        IErpInvoiceContext invoiceContext, ILogger<DynamicErpValidator> logger)
     {
         _erp = erp;
         _vendorContext = vendorContext;
         _fieldContext = fieldContext;
         _ownCompany = ownCompany;
+        _invoiceContext = invoiceContext;
         _logger = logger;
     }
 
@@ -142,8 +144,17 @@ public class DynamicErpValidator : IFieldValidator
         {
             var vendorResult = await _erp.LookupVendorByNameAsync(value, ct);
             if (!vendorResult.Found)
+            {
+                // Non-null ErrorMessage means a connectivity/auth problem — the ERP was
+                // unreachable, so we can't confirm or deny the vendor's existence.
+                // Return Warning (not Failed) so it doesn't block document approval.
+                if (!string.IsNullOrWhiteSpace(vendorResult.ErrorMessage))
+                    return new FieldValidationResult("Warning",
+                        $"Could not verify vendor '{value}' — {vendorResult.ErrorMessage}.", "DynamicErp");
+                // Null ErrorMessage means the ERP call succeeded but no matching vendor was found.
                 return new FieldValidationResult("Failed",
                     $"Vendor '{value}' not found in Acumatica.", "DynamicErp");
+            }
             if (!vendorResult.Data!.IsActive)
                 return new FieldValidationResult("Warning",
                     $"Vendor '{value}' found (ID: {vendorResult.Data.VendorId}) but is inactive.", "DynamicErp", vendorResult.Data);
@@ -174,6 +185,21 @@ public class DynamicErpValidator : IFieldValidator
                     "DynamicErp");
 
             var inv = invResult.Data!;
+
+            // Propagate resolved vendor ID so subsequent validators in the same run
+            // (Date, Amount cross-field checks) can use the vendor-filtered bill lookup.
+            if (!string.IsNullOrWhiteSpace(inv.VendorId))
+                _vendorContext.ResolvedVendorId = inv.VendorId;
+
+            // In row validation, cache the rich bill record so Date/Amount validators
+            // can reuse it without a second ERP call.
+            if (_invoiceContext.IsRowValidation && !string.IsNullOrWhiteSpace(inv.VendorId))
+            {
+                var rich = await _erp.LookupBillByVendorRefAndVendorIdAsync(value, inv.VendorId, ct);
+                if (rich.Found && rich.Data is not null)
+                    _invoiceContext.SetCachedInvoice(value, rich.Data);
+            }
+
             return new FieldValidationResult("Passed",
                 $"Invoice verified — {inv.DocType} {inv.RefNbr}, Vendor: {inv.VendorId}, Date: {inv.DocDate}, Status: {inv.Status}",
                 "DynamicErp", inv);
@@ -208,20 +234,33 @@ public class DynamicErpValidator : IFieldValidator
             // When looking up a bill by VendorRef and we have a resolved vendor ID, use the
             // vendor-filtered lookup to ensure we get the correct bill — not just any bill
             // that happens to share the same VendorRef across different vendors.
+            // When we have a resolved vendor ID, always use vendor-filtered lookup — applies to
+            // Amount, Balance, DocDate, DueDate (and VendorRef) cross-field checks so the
+            // validator never picks up a bill from the wrong vendor.
             ErpLookupResult<IReadOnlyDictionary<string, string>> billResult;
-            if (depField.Equals("VendorRef", StringComparison.OrdinalIgnoreCase) &&
+            // In row validation, ErpApInvoiceValidator may have already fetched this invoice — reuse it.
+            if (_invoiceContext.IsRowValidation &&
+                _invoiceContext.CachedInvoiceData is not null &&
+                depField.Equals("VendorRef", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(_invoiceContext.CachedVendorRef, depFieldValue, StringComparison.OrdinalIgnoreCase))
+            {
+                billResult = new ErpLookupResult<IReadOnlyDictionary<string, string>>(true, _invoiceContext.CachedInvoiceData, null);
+            }
+            else if (depField.Equals("VendorRef", StringComparison.OrdinalIgnoreCase) &&
                 !string.IsNullOrWhiteSpace(_vendorContext.ResolvedVendorId))
             {
                 billResult = await _erp.LookupBillByVendorRefAndVendorIdAsync(depFieldValue, _vendorContext.ResolvedVendorId, ct);
-                // If vendor-filtered lookup finds nothing (VendorId format mismatch between Vendor/Bill endpoints),
-                // fall back to unfiltered lookup so behaviour matches the ERP test page.
-                if (!billResult.Found)
-                {
-                    _logger.LogWarning(
-                        "Vendor-filtered bill lookup returned not found for VendorRef='{DepValue}' VendorId='{VendorId}' — falling back to unfiltered lookup",
-                        depFieldValue, _vendorContext.ResolvedVendorId);
-                    billResult = await _erp.LookupGenericAsync(entity, depField, depFieldValue, ct);
-                }
+                // Do NOT fall back to unfiltered — if vendor-filtered lookup finds nothing we report
+                // it as not-found for this vendor, not as a hit on a different vendor's bill.
+            }
+            else if (depField.Equals("VendorRef", StringComparison.OrdinalIgnoreCase))
+            {
+                // Vendor ID could not be resolved — an unfiltered VendorRef lookup risks matching
+                // a bill from a different vendor and producing a false mismatch on date/amount.
+                // Return Warning so the user knows to validate the vendor/invoice fields first.
+                return new FieldValidationResult("Warning",
+                    $"Cannot verify {matchField} — vendor ID not resolved. Please re-validate the vendor name and invoice number fields first.",
+                    "DynamicErp");
             }
             else
             {
@@ -272,7 +311,27 @@ public class DynamicErpValidator : IFieldValidator
         }
 
         skipCrossField:
-        var result = await _erp.LookupGenericAsync(entity, matchField, value, ct);
+        // For Bill/invoice VendorRef lookups without a DependentFieldKey, use vendor-filtered
+        // lookup when ResolvedVendorId is available — prevents matching a same-ref invoice from
+        // a different vendor.
+        ErpLookupResult<IReadOnlyDictionary<string, string>> result;
+        if (isInvoiceEntity &&
+            matchField.Equals("VendorRef", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(_vendorContext.ResolvedVendorId))
+        {
+            result = await _erp.LookupBillByVendorRefAndVendorIdAsync(value, _vendorContext.ResolvedVendorId, ct);
+            if (!result.Found)
+            {
+                _logger.LogWarning(
+                    "Vendor-filtered bill lookup returned not found for VendorRef='{Value}' VendorId='{VendorId}' — falling back to unfiltered",
+                    value, _vendorContext.ResolvedVendorId);
+                result = await _erp.LookupGenericAsync(entity, matchField, value, ct);
+            }
+        }
+        else
+        {
+            result = await _erp.LookupGenericAsync(entity, matchField, value, ct);
+        }
 
         if (!result.Found)
             return new FieldValidationResult("Failed",

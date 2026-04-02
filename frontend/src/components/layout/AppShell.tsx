@@ -1,10 +1,11 @@
-import { Link, useLocation, Outlet } from 'react-router-dom';
+import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import {
   LayoutDashboard, FileText, Upload, Settings, Users,
-  ClipboardList, LogOut, X, Cpu, FlaskConical, Building2, Trash2, MoreHorizontal,
+  ClipboardList, LogOut, X, FlaskConical, Building2, Trash2, MoreHorizontal, TrendingUp, Download, GitBranch, AlertTriangle,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
+import { useAcumaticaSession, type SessionExpiredReason } from '../../hooks/useAcumaticaSession';
 
 const navItems = [
   { to: '/dashboard',          label: 'Dashboard', icon: LayoutDashboard },
@@ -12,21 +13,52 @@ const navItems = [
   { to: '/documents/upload',   label: 'Upload',     icon: Upload },
 ];
 
+const managerItems = [
+  { to: '/admin/cash-flow',   label: 'Cash Flow',   icon: TrendingUp },
+  { to: '/admin/vendors',     label: 'Vendors',     icon: Building2 },
+  { to: '/admin/export',      label: 'Export',      icon: Download },
+  { to: '/admin/rubbish-bin', label: 'Rubbish Bin', icon: Trash2 },
+];
+
 const adminItems = [
-  { to: '/admin/vendors',     label: 'Vendors',      icon: Building2 },
-  { to: '/admin/users',       label: 'Users',        icon: Users },
-  { to: '/admin/config',      label: 'Field Config', icon: Settings },
-  { to: '/admin/audit',       label: 'Audit Log',    icon: ClipboardList },
-  { to: '/admin/erp-test',    label: 'ERP Test',     icon: FlaskConical },
-  { to: '/admin/rubbish-bin', label: 'Rubbish Bin',  icon: Trash2 },
+  { to: '/admin/users',    label: 'Users',        icon: Users },
+  { to: '/admin/branches', label: 'Branches',     icon: GitBranch },
+  { to: '/admin/config',   label: 'Field Config', icon: Settings },
+  { to: '/admin/audit',    label: 'Audit Log',    icon: ClipboardList },
+  { to: '/admin/erp-test', label: 'ERP Test',     icon: FlaskConical },
 ];
 
 export default function AppShell() {
-  const { user, logout, isManagerOrAbove } = useAuth();
+  const { user, logout, isManagerOrAbove, isAdmin } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const [sessionExpiredMsg, setSessionExpiredMsg] = useState<string | null>(null);
+
+  const handleSessionExpired = (reason: SessionExpiredReason) => {
+    const msg = reason === 'inactivity'
+      ? 'Your Acumatica session ended due to 10 minutes of inactivity.'
+      : 'Your Acumatica session has expired. Please sign in again.';
+    setSessionExpiredMsg(msg);
+    setTimeout(() => {
+      sessionStorage.removeItem('access_token');
+      sessionStorage.removeItem('acumatica_token');
+      localStorage.setItem('auth-logged-out', '1');
+      navigate('/login?error=session_expired');
+    }, 4000);
+  };
+
+  useAcumaticaSession({ onSessionExpired: handleSessionExpired });
+
+  // Also listen for the global event fired by the axios interceptor on 424.
+  useEffect(() => {
+    const handler = () => handleSessionExpired('token_expired');
+    window.addEventListener('acumatica-session-expired', handler);
+    return () => window.removeEventListener('acumatica-session-expired', handler);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Close user menu on outside click
   useEffect(() => {
@@ -75,15 +107,23 @@ export default function AppShell() {
       <div className="p-4 border-b border-border">
         <Link to="/dashboard" className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center flex-shrink-0">
-            <Cpu className="h-4 w-4 text-primary-foreground" />
+            <span className="text-primary-foreground font-bold text-[8px] leading-none tracking-tight">OCR</span>
           </div>
-          <span className="font-semibold text-lg text-foreground">OCR ERP</span>
+          <span className="font-semibold text-lg text-foreground">OCR System</span>
         </Link>
       </div>
 
       <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
         {navItems.map(item => <SidebarLink key={item.to} {...item} />)}
         {isManagerOrAbove && (
+          <>
+            <div className="pt-4 pb-1 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+              Manager
+            </div>
+            {managerItems.map(item => <SidebarLink key={item.to} {...item} />)}
+          </>
+        )}
+        {isAdmin && (
           <>
             <div className="pt-4 pb-1 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
               Admin
@@ -136,9 +176,9 @@ export default function AppShell() {
             <div className="flex items-center justify-between px-4 py-3 border-b border-border">
               <Link to="/dashboard" onClick={() => setMobileOpen(false)} className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center flex-shrink-0">
-                  <Cpu className="h-4 w-4 text-primary-foreground" />
+                  <span className="text-primary-foreground font-bold text-[8px] leading-none tracking-tight">OCR</span>
                 </div>
-                <span className="font-semibold text-lg text-foreground">OCR ERP</span>
+                <span className="font-semibold text-lg text-foreground">OCR System</span>
               </Link>
               <button
                 onClick={() => setMobileOpen(false)}
@@ -153,9 +193,17 @@ export default function AppShell() {
               {isManagerOrAbove ? (
                 <>
                   <div className="pb-1 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                    Admin
+                    Manager
                   </div>
-                  {adminItems.map(item => <SidebarLink key={item.to} {...item} />)}
+                  {managerItems.map(item => <SidebarLink key={item.to} {...item} />)}
+                  {isAdmin && (
+                    <>
+                      <div className="pt-4 pb-1 px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                        Admin
+                      </div>
+                      {adminItems.map(item => <SidebarLink key={item.to} {...item} />)}
+                    </>
+                  )}
                 </>
               ) : (
                 <p className="text-sm text-muted-foreground px-3 py-4">No additional options.</p>
@@ -172,9 +220,9 @@ export default function AppShell() {
         <header className="md:hidden sticky top-0 z-30 border-b border-border bg-card/95 backdrop-blur-sm px-4 h-14 flex items-center justify-between">
           <Link to="/dashboard" className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg bg-primary flex items-center justify-center flex-shrink-0">
-              <Cpu className="h-3.5 w-3.5 text-primary-foreground" />
+              <span className="text-primary-foreground font-bold text-[8px] leading-none tracking-tight">OCR</span>
             </div>
-            <span className="font-semibold text-foreground">OCR ERP</span>
+            <span className="font-semibold text-foreground">OCR System</span>
           </Link>
 
           {/* User avatar — opens user dropdown */}
@@ -208,6 +256,14 @@ export default function AppShell() {
             )}
           </div>
         </header>
+
+        {/* Acumatica session-expired banner */}
+        {sessionExpiredMsg && (
+          <div className="sticky top-0 z-50 flex items-center gap-3 bg-amber-50 border-b border-amber-200 px-4 py-3 text-amber-800">
+            <AlertTriangle className="h-5 w-5 flex-shrink-0 text-amber-500" />
+            <span className="text-sm font-medium flex-1">{sessionExpiredMsg} Redirecting to sign in...</span>
+          </div>
+        )}
 
         {/* Page content */}
         <main className="flex-1 overflow-auto p-4 md:p-6 pb-24 md:pb-6">

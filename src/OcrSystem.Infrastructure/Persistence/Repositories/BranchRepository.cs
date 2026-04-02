@@ -15,6 +15,23 @@ public class BranchRepository
     public async Task<Branch?> GetByAcumaticaIdAsync(string acumaticaBranchId, CancellationToken ct = default) =>
         await _db.Branches.FirstOrDefaultAsync(b => b.AcumaticaBranchId == acumaticaBranchId, ct);
 
+    /// <summary>
+    /// Case-insensitive lookup by branch code, Acumatica branch ID, or branch name.
+    /// Used when matching a value extracted from an OCR document.
+    /// </summary>
+    public async Task<Branch?> GetByCodeOrNameAsync(string value, CancellationToken ct = default)
+    {
+        var upper = value.Trim().ToUpperInvariant();
+        return await _db.Branches.FirstOrDefaultAsync(
+            b => b.AcumaticaBranchId.ToUpper() == upper
+              || b.BranchCode.ToUpper() == upper
+              || b.BranchName.ToUpper() == upper, ct);
+    }
+
+    /// <summary>Kept for compatibility — delegates to GetByCodeOrNameAsync.</summary>
+    public Task<Branch?> GetByCodeAsync(string code, CancellationToken ct = default)
+        => GetByCodeOrNameAsync(code, ct);
+
     public async Task UpsertAsync(Branch branch, CancellationToken ct = default)
     {
         var existing = await GetByAcumaticaIdAsync(branch.AcumaticaBranchId, ct);

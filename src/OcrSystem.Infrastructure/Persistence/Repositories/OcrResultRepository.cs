@@ -42,6 +42,25 @@ public class OcrResultRepository
         await _db.SaveChangesAsync(ct);
     }
 
+    public async Task AddFieldAsync(ExtractedField field, CancellationToken ct = default)
+    {
+        await _db.ExtractedFields.AddAsync(field, ct);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    public async Task DeleteAllFieldsAsync(Guid ocrResultId, CancellationToken ct = default)
+    {
+        var fields = await _db.ExtractedFields.Where(f => f.OcrResultId == ocrResultId).ToListAsync(ct);
+        _db.ExtractedFields.RemoveRange(fields);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    public async Task AddFieldsAsync(IEnumerable<ExtractedField> fields, CancellationToken ct = default)
+    {
+        await _db.ExtractedFields.AddRangeAsync(fields, ct);
+        await _db.SaveChangesAsync(ct);
+    }
+
     public async Task DeleteFieldAsync(Guid fieldId, CancellationToken ct = default)
     {
         var field = await _db.ExtractedFields.FindAsync([fieldId], ct);

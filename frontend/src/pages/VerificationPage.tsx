@@ -94,7 +94,7 @@ export default function VerificationPage() {
   const fields = ocrResult?.fields ?? [];
   const rawText = ocrResult?.rawText;
   const isPdf = doc?.originalFilename.toLowerCase().endsWith('.pdf');
-  const canCheck = doc && !['Uploaded', 'Processing', 'Approved', 'Pushed', 'Checked'].includes(doc.status);
+  const canCheck = doc && !['Uploaded', 'PendingProcess', 'Processing', 'Approved', 'Pushed', 'Checked'].includes(doc.status);
 
   const selectedBBox = selectedField?.boundingBox;
 
@@ -130,7 +130,7 @@ export default function VerificationPage() {
       {/* Top bar — flex-shrink-0 keeps it pinned while panels scroll independently */}
       <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-gray-200 flex-shrink-0 z-10">
         <div className="flex items-center gap-3">
-          <button onClick={() => navigate(`/documents/${id}`)} className="text-gray-500 hover:text-gray-700">
+          <button onClick={() => navigate(-1)} className="text-gray-500 hover:text-gray-700">
             <ChevronLeft className="h-5 w-5" />
           </button>
           <div>
@@ -207,7 +207,7 @@ export default function VerificationPage() {
               <div className="flex flex-col items-center justify-center gap-3 text-red-500 p-6 text-center h-full">
                 <p className="text-sm font-medium">Failed to load document</p>
                 <p className="text-xs text-gray-500">{pdfError}</p>
-                <a href={pdfUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 underline">
+                <a href={pdfUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-primary underline">
                   Open file directly
                 </a>
               </div>
@@ -230,7 +230,7 @@ export default function VerificationPage() {
                 {/* Bounding box overlay for selected field */}
                 {selectedBBox && selectedBBox.page === currentPage && (
                   <div
-                    className="absolute border-2 border-blue-500 bg-blue-100/30 rounded pointer-events-none"
+                    className="absolute border-2 border-primary bg-primary/20 rounded pointer-events-none"
                     style={{
                       left: selectedBBox.x * scale,
                       top: selectedBBox.y * scale,
@@ -254,7 +254,7 @@ export default function VerificationPage() {
         {/* Resize divider */}
         <div
           onMouseDown={startDrag}
-          className="w-1.5 bg-gray-200 hover:bg-blue-400 active:bg-blue-500 cursor-col-resize flex-shrink-0 transition-colors"
+          className="w-1.5 bg-gray-200 hover:bg-primary/50 active:bg-primary cursor-col-resize flex-shrink-0 transition-colors"
           title="Drag to resize"
         />
 

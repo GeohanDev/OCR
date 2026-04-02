@@ -632,13 +632,22 @@ export default function FieldMappingConfigPage() {
 
               {/* Search Hint */}
               <Field label="Search Hint">
-                <input
-                  className="input"
+                <textarea
+                  className="input resize-none overflow-hidden"
+                  rows={1}
                   placeholder={form.dataSource === 'table'
                     ? 'e.g. column header "Description" or "Item"'
                     : 'e.g. label near the value "Invoice No." or "Date"'}
                   value={form.searchHint}
-                  onChange={e => setForm(f => ({ ...f, searchHint: e.target.value }))}
+                  onChange={e => {
+                    const el = e.target;
+                    el.style.height = 'auto';
+                    el.style.height = `${el.scrollHeight}px`;
+                    setForm(f => ({ ...f, searchHint: el.value }));
+                  }}
+                  ref={el => {
+                    if (el) { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px`; }
+                  }}
                 />
                 <p className="text-xs text-muted-foreground mt-1">
                   Optional. Tells Claude where to find this field — e.g. a nearby label or column header.

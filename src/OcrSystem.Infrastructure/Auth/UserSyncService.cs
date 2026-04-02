@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using OcrSystem.Application.Auth;
 using OcrSystem.Application.ERP;
@@ -12,7 +13,9 @@ public class UserSyncService : IUserSyncService
     private readonly IErpIntegrationService _erp;
     private readonly UserRepository _users;
     private readonly BranchRepository _branches;
+    private readonly DocumentRepository _documents;
     private readonly ILogger<UserSyncService> _logger;
+    private readonly string? _protectedAdminUsername;
 
     private static readonly Dictionary<string, UserRole> RoleMapping = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -22,12 +25,14 @@ public class UserSyncService : IUserSyncService
         ["FinanceManager"] = UserRole.Manager,
     };
 
-    public UserSyncService(IErpIntegrationService erp, UserRepository users, BranchRepository branches, ILogger<UserSyncService> logger)
+    public UserSyncService(IErpIntegrationService erp, UserRepository users, BranchRepository branches, DocumentRepository documents, IConfiguration config, ILogger<UserSyncService> logger)
     {
         _erp = erp;
         _users = users;
         _branches = branches;
+        _documents = documents;
         _logger = logger;
+        _protectedAdminUsername = config["LocalAdmin:Username"];
     }
 
     public async Task<UserSyncResult> SyncAllUsersAsync(CancellationToken ct = default)
@@ -91,11 +96,35 @@ public class UserSyncService : IUserSyncService
             var allLocal = await _users.GetAllAsync(ct);
             foreach (var u in allLocal.Where(u => u.IsActive && !syncedIds.Contains(u.AcumaticaUserId)))
             {
+                // Never deactivate the protected admin account
+                if (!string.IsNullOrWhiteSpace(_protectedAdminUsername) &&
+                    string.Equals(u.Username, _protectedAdminUsername, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
                 u.IsActive = false;
                 u.UpdatedAt = DateTimeOffset.UtcNow;
                 await _users.UpdateAsync(u, ct);
                 deactivated++;
             }
+
+            // Ensure protected admin account always has Admin role and is active after sync
+            if (!string.IsNullOrWhiteSpace(_protectedAdminUsername))
+            {
+                var adminUser = allLocal.FirstOrDefault(u =>
+                    string.Equals(u.Username, _protectedAdminUsername, StringComparison.OrdinalIgnoreCase));
+                if (adminUser is not null && (adminUser.Role != UserRole.Admin || !adminUser.IsActive))
+                {
+                    adminUser.Role = UserRole.Admin;
+                    adminUser.IsActive = true;
+                    adminUser.UpdatedAt = DateTimeOffset.UtcNow;
+                    await _users.UpdateAsync(adminUser, ct);
+                }
+            }
+
+            // Propagate each user's branch to their unassigned documents.
+            var allUsers = await _users.GetAllAsync(ct);
+            foreach (var u in allUsers.Where(u => u.BranchId.HasValue))
+                await _documents.UpdateBranchForUserAsync(u.Id, u.BranchId, ct);
 
             _logger.LogInformation("User sync: created={C} updated={U} deactivated={D}", created, updated, deactivated);
             return new UserSyncResult(created, updated, deactivated);

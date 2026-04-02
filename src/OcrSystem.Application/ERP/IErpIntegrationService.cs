@@ -50,6 +50,13 @@ public interface IErpIntegrationService
     Task<IReadOnlyList<OpenBillDto>> FetchOpenBillsForVendorAsync(string vendorId, CancellationToken ct = default);
 
     /// <summary>
+    /// Fetches ALL open AP bills across all vendors in one call.
+    /// Each bill includes VendorId, Balance, and DueDate for aging computation.
+    /// Used by AgingSnapshotService to compute Kind 1 (current aging) for all vendors at once.
+    /// </summary>
+    Task<IReadOnlyList<OpenBillDto>> FetchAllOpenBillsForAgingAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// Generic OData lookup: queries any Acumatica entity and checks if a record
     /// exists where <paramref name="field"/> equals <paramref name="value"/>.
     /// Returns the first matching record's fields as a flat string dictionary.
@@ -68,6 +75,42 @@ public interface IErpIntegrationService
 
     /// <summary>Returns the raw HTTP response from the OData service document endpoint for debugging.</summary>
     Task<string> GetODataServiceDocumentRawAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Calls the APAging Generic Inquiry (GI) in Acumatica.
+    /// Parameters: BranchID (optional), VendorID (optional), AgeDate (required).
+    /// Returns one row per vendor as a flat string dictionary of GI columns.
+    /// </summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, string>>> FetchApAgingGiAsync(
+        string? branchId, string? vendorId, DateTimeOffset ageDate, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetches ALL vendor rows from the APAging GI in one call:
+    /// PUT to set the AgeDate parameter, then GET the full result set.
+    /// Returns one row per vendor with aging buckets + VendorID.
+    /// </summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, string>>> FetchAllApAgingRowsAsync(
+        DateTimeOffset ageDate, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetches all vendor aging rows from the AllAPAging GI for a specific branch.
+    /// PUT to set Branch + AgeasofDate, returns every vendor row for that branch.
+    /// Call once per active branch and aggregate to get full Kind 1 (current aging) coverage.
+    /// </summary>
+    Task<IReadOnlyList<IReadOnlyDictionary<string, string>>> FetchAllApAgingFromAllGiAsync(
+        string branchId, DateTimeOffset ageDate, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fires a raw authenticated GET to any URL and returns (statusCode, first 1000 chars of body).
+    /// Used by diagnostic probes to test URL patterns without going through parsing logic.
+    /// </summary>
+    Task<(int Status, string Body)> RawGetAsync(string url, CancellationToken ct = default);
+
+    /// <summary>
+    /// Lightweight call to verify the current token is still valid.
+    /// Returns true on success; throws AcumaticaAuthException on 401/403.
+    /// </summary>
+    Task<bool> PingAsync(CancellationToken ct = default);
 
     /// <summary>
     /// Fetches the first record from any Acumatica entity (no filter, $top=1) to verify

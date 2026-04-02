@@ -19,6 +19,7 @@ public class ValidationService : IValidationService
     private readonly IEnumerable<IFieldValidator> _validators;
     private readonly IValidationFieldContext _fieldContext;
     private readonly IVendorResolutionContext _vendorContext;
+    private readonly IErpInvoiceContext _invoiceContext;
     private readonly ILogger<ValidationService> _logger;
 
     public ValidationService(
@@ -30,6 +31,7 @@ public class ValidationService : IValidationService
         IEnumerable<IFieldValidator> validators,
         IValidationFieldContext fieldContext,
         IVendorResolutionContext vendorContext,
+        IErpInvoiceContext invoiceContext,
         ILogger<ValidationService> logger)
     {
         _ocrRepo = ocrRepo;
@@ -40,6 +42,7 @@ public class ValidationService : IValidationService
         _validators = validators;
         _fieldContext = fieldContext;
         _vendorContext = vendorContext;
+        _invoiceContext = invoiceContext;
         _logger = logger;
     }
 
@@ -66,56 +69,33 @@ public class ValidationService : IValidationService
 
         var results = new List<Domain.Entities.ValidationResult>();
         var resultDtos = new List<ValidationResultDto>();
+        var fieldResults = new List<Domain.Entities.ValidationResult>();
 
         _fieldContext.SetFieldErpKeys(BuildFieldErpKeys(ocrResult.ExtractedFields));
 
         // Build a lookup of table fields grouped by their column name, keeping extraction order intact.
         var tableFieldsByName = ocrResult.ExtractedFields
             .Where(f => f.FieldMappingConfig?.AllowMultiple == true)
-            .OrderBy(f => f.SortOrder) // Ensure original extraction sequence applies
+            .OrderBy(f => f.SortOrder)
             .GroupBy(f => f.FieldName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
 
         // Base field values (last value per name — used for header fields).
         var baseFieldValues = BuildFieldValues(ocrResult.ExtractedFields);
 
-        // Sort by DisplayOrder so vendor-name fields (lower order) are validated before
-        // invoice-number fields, ensuring IVendorResolutionContext is populated first.
-        foreach (var field in ocrResult.ExtractedFields.OrderBy(f => f.FieldMappingConfig?.DisplayOrder ?? int.MaxValue))
+        // ── Phase 1: Header (non-AllowMultiple) fields ───────────────────────────
+        // Validate in DisplayOrder so vendor-name resolves before invoice fields.
+        _fieldContext.SetFieldValues(baseFieldValues);
+
+        foreach (var field in ocrResult.ExtractedFields
+            .Where(f => f.FieldMappingConfig?.AllowMultiple != true)
+            .OrderBy(f => f.FieldMappingConfig?.DisplayOrder ?? int.MaxValue))
         {
             var config = field.FieldMappingConfig;
             if (config is null) continue;
 
-            // For table fields (AllowMultiple), override FieldValues with this row's sibling
-            // values so DependentFieldKey cross-checks use the correct per-row value.
-            if (config.AllowMultiple && tableFieldsByName.TryGetValue(field.FieldName, out var columnFields))
-            {
-                // Find the visual row index of THIS field within its column
-                int rowIndex = columnFields.FindIndex(f => f.Id == field.Id);
-
-                var rowValues = new Dictionary<string, string>(baseFieldValues, StringComparer.OrdinalIgnoreCase);
-                if (rowIndex >= 0)
-                {
-                    // For each other table column, grab the sibling at the exact same row index
-                    foreach (var kvp in tableFieldsByName)
-                    {
-                        var siblingCol = kvp.Value;
-                        if (rowIndex < siblingCol.Count)
-                        {
-                            var sibling = siblingCol[rowIndex];
-                            var v = sibling.CorrectedValue ?? sibling.NormalizedValue ?? sibling.RawValue;
-                            if (v != null) rowValues[sibling.FieldName] = v;
-                        }
-                    }
-                }
-                _fieldContext.SetFieldValues(rowValues);
-            }
-            else
-            {
-                _fieldContext.SetFieldValues(baseFieldValues);
-            }
-
-            var fieldDto = MapFieldDto(field);
+            fieldResults.Clear();
+            var fieldDto  = MapFieldDto(field);
             var configDto = MapConfigDto(config);
 
             foreach (var validator in _validators)
@@ -124,21 +104,14 @@ public class ValidationService : IValidationService
                     (!string.IsNullOrWhiteSpace(config.ErpMappingKey) &&
                      validator.CanHandle(config.ErpMappingKey));
                 if (!shouldRun) continue;
-
-                // Skip validators that are restricted to a specific document category
-                // unless the document belongs to that category.
                 if (validator.RequiresCategory.HasValue && validator.RequiresCategory.Value != docCategory)
                     continue;
 
                 FieldValidationResult vResult;
-                try
-                {
-                    vResult = await validator.ValidateAsync(fieldDto, configDto, ct);
-                }
+                try { vResult = await validator.ValidateAsync(fieldDto, configDto, ct); }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex,
-                        "Validator {Validator} failed for field {Field} — recording as Warning",
+                    _logger.LogWarning(ex, "Validator {V} failed for field {F} — recording as Warning",
                         validator.GetType().Name, field.FieldName);
                     vResult = new FieldValidationResult("Warning",
                         $"Validation check unavailable ({validator.GetType().Name}).",
@@ -157,11 +130,112 @@ public class ValidationService : IValidationService
                     ErpResponseField = configDto.ErpResponseField,
                     ValidatedAt      = DateTimeOffset.UtcNow
                 };
-                results.Add(dbResult);
+                fieldResults.Add(dbResult);
                 resultDtos.Add(new ValidationResultDto(
                     Guid.NewGuid(), documentId, field.Id, field.FieldName,
                     vResult.ValidationType, vResult.Status, vResult.Message,
                     vResult.ErpReference, configDto.ErpResponseField, dbResult.ValidatedAt));
+            }
+
+            if (fieldResults.Count > 0)
+            {
+                await _validationRepo.AddRangeAsync(fieldResults, ct);
+                results.AddRange(fieldResults);
+            }
+        }
+
+        // ── Phase 2: Table rows — one complete row at a time ─────────────────────
+        // Enable invoice caching so ErpApInvoiceValidator fetches once per row and
+        // DynamicErpValidator reuses the same record for date/amount validation.
+        _invoiceContext.IsRowValidation = true;
+
+        int rowCount = tableFieldsByName.Values.Count > 0
+            ? tableFieldsByName.Values.Max(col => col.Count)
+            : 0;
+
+        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++)
+        {
+            // Reset per-row invoice cache so row N doesn't bleed into row N+1.
+            // Vendor ID stays resolved (header vendor applies to all rows).
+            _invoiceContext.ClearCache();
+
+            // Build field-value context for this row: start from header values,
+            // then overlay each column's value at rowIndex.
+            var rowValues = new Dictionary<string, string>(baseFieldValues, StringComparer.OrdinalIgnoreCase);
+            foreach (var col in tableFieldsByName.Values)
+            {
+                if (rowIndex < col.Count)
+                {
+                    var f = col[rowIndex];
+                    var v = f.CorrectedValue ?? f.NormalizedValue ?? f.RawValue;
+                    if (v != null) rowValues[f.FieldName] = v;
+                }
+            }
+            _fieldContext.SetFieldValues(rowValues);
+
+            // Within the row, process the invoice-number field first so its ERP fetch
+            // populates the cache before date/amount validators run.
+            var rowFields = tableFieldsByName.Values
+                .Where(col => rowIndex < col.Count)
+                .Select(col => col[rowIndex])
+                .OrderBy(f => f.FieldMappingConfig?.ErpMappingKey == "ApInvoiceNbr" ||
+                               f.FieldMappingConfig?.ErpMappingKey?.EndsWith(":VendorRef", StringComparison.OrdinalIgnoreCase) == true
+                               ? 0 : 1)
+                .ThenBy(f => f.FieldMappingConfig?.DisplayOrder ?? int.MaxValue);
+
+            foreach (var field in rowFields)
+            {
+                var config = field.FieldMappingConfig;
+                if (config is null) continue;
+
+                fieldResults.Clear();
+                var fieldDto  = MapFieldDto(field);
+                var configDto = MapConfigDto(config);
+
+                foreach (var validator in _validators)
+                {
+                    bool shouldRun = validator.RunForAllFields ||
+                        (!string.IsNullOrWhiteSpace(config.ErpMappingKey) &&
+                         validator.CanHandle(config.ErpMappingKey));
+                    if (!shouldRun) continue;
+                    if (validator.RequiresCategory.HasValue && validator.RequiresCategory.Value != docCategory)
+                        continue;
+
+                    FieldValidationResult vResult;
+                    try { vResult = await validator.ValidateAsync(fieldDto, configDto, ct); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Validator {V} failed for field {F} — recording as Warning",
+                            validator.GetType().Name, field.FieldName);
+                        vResult = new FieldValidationResult("Warning",
+                            $"Validation check unavailable ({validator.GetType().Name}).",
+                            validator.GetType().Name.Replace("Validator", ""));
+                    }
+
+                    var dbResult = new Domain.Entities.ValidationResult
+                    {
+                        DocumentId       = documentId,
+                        ExtractedFieldId = field.Id,
+                        FieldName        = field.FieldName,
+                        ValidationType   = vResult.ValidationType,
+                        Status           = Enum.Parse<ValidationStatus>(vResult.Status),
+                        Message          = vResult.Message,
+                        ErpReference     = vResult.ErpReference is not null ? JsonSerializer.Serialize(vResult.ErpReference) : null,
+                        ErpResponseField = configDto.ErpResponseField,
+                        ValidatedAt      = DateTimeOffset.UtcNow
+                    };
+                    fieldResults.Add(dbResult);
+                    resultDtos.Add(new ValidationResultDto(
+                        Guid.NewGuid(), documentId, field.Id, field.FieldName,
+                        vResult.ValidationType, vResult.Status, vResult.Message,
+                        vResult.ErpReference, configDto.ErpResponseField, dbResult.ValidatedAt));
+                }
+
+                if (fieldResults.Count > 0)
+                {
+                    await _validationRepo.AddRangeAsync(fieldResults, ct);
+                    results.AddRange(fieldResults);
+                }
             }
         }
 
@@ -187,6 +261,7 @@ public class ValidationService : IValidationService
                     ErpResponseField = cfg.ErpResponseField,
                     ValidatedAt      = DateTimeOffset.UtcNow
                 };
+                await _validationRepo.AddRangeAsync([dbResult], ct);
                 results.Add(dbResult);
                 resultDtos.Add(new ValidationResultDto(
                     Guid.NewGuid(), documentId, null, cfg.FieldName,
@@ -195,13 +270,145 @@ public class ValidationService : IValidationService
             }
         }
 
-        await _validationRepo.AddRangeAsync(results, ct);
-
         // Auto-link document to local vendor when vendor name validation passes
         await TryLinkDocumentVendorAsync(documentId, ct);
 
         int passed = resultDtos.Count(r => r.Status == "Passed");
         int failed = resultDtos.Count(r => r.Status == "Failed");
+        int warnings = resultDtos.Count(r => r.Status == "Warning");
+
+        return new ValidationSummary(documentId, resultDtos.Count, passed, failed, warnings, failed == 0, resultDtos);
+    }
+
+    /// <summary>
+    /// Re-validates only table (AllowMultiple) rows, preserving existing header field results.
+    /// Used by the "Validate Table" queue job so header results don't need to be re-run.
+    /// Vendor context is pre-populated from saved header validation results.
+    /// </summary>
+    public async Task<ValidationSummary> ValidateTableRowsAsync(Guid documentId, CancellationToken ct = default)
+    {
+        var ocrResult = await _ocrRepo.GetByDocumentIdAsync(documentId, ct);
+        if (ocrResult is null) return new ValidationSummary(documentId, 0, 0, 0, 0, false, []);
+
+        var doc = await _docRepo.GetByIdAsync(documentId, ct);
+        var docCategory = DocumentCategoryEnum.General;
+        if (doc?.DocumentTypeId is not null)
+        {
+            var docType = await _fieldMappingRepo.GetDocumentTypeByIdAsync(doc.DocumentTypeId.Value, ct);
+            if (docType is not null) docCategory = docType.Category;
+        }
+
+        var baseFieldValues = BuildFieldValues(ocrResult.ExtractedFields);
+        _fieldContext.SetFieldValues(baseFieldValues);
+        _fieldContext.SetFieldErpKeys(BuildFieldErpKeys(ocrResult.ExtractedFields));
+
+        // Restore vendor context from previously saved header validation results so
+        // invoice and cross-field validators use the correct vendor-filtered lookups.
+        await PrePopulateVendorContextAsync(documentId, ct);
+
+        var tableFieldsByName = ocrResult.ExtractedFields
+            .Where(f => f.FieldMappingConfig?.AllowMultiple == true)
+            .OrderBy(f => f.SortOrder)
+            .GroupBy(f => f.FieldName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        // Delete existing results for table fields only — header results are kept intact.
+        foreach (var col in tableFieldsByName.Values)
+            foreach (var field in col)
+                await _validationRepo.DeleteByExtractedFieldIdAsync(field.Id, ct);
+
+        _invoiceContext.IsRowValidation = true;
+
+        int rowCount = tableFieldsByName.Values.Count > 0
+            ? tableFieldsByName.Values.Max(col => col.Count)
+            : 0;
+
+        var results    = new List<Domain.Entities.ValidationResult>();
+        var resultDtos = new List<ValidationResultDto>();
+        var fieldResults = new List<Domain.Entities.ValidationResult>();
+
+        for (int rowIndex = 0; rowIndex < rowCount; rowIndex++)
+        {
+            _invoiceContext.ClearCache();
+
+            var rowValues = new Dictionary<string, string>(baseFieldValues, StringComparer.OrdinalIgnoreCase);
+            foreach (var col in tableFieldsByName.Values)
+            {
+                if (rowIndex < col.Count)
+                {
+                    var f = col[rowIndex];
+                    var v = f.CorrectedValue ?? f.NormalizedValue ?? f.RawValue;
+                    if (v != null) rowValues[f.FieldName] = v;
+                }
+            }
+            _fieldContext.SetFieldValues(rowValues);
+
+            var rowFields = tableFieldsByName.Values
+                .Where(col => rowIndex < col.Count)
+                .Select(col => col[rowIndex])
+                .OrderBy(f => f.FieldMappingConfig?.ErpMappingKey == "ApInvoiceNbr" ||
+                               f.FieldMappingConfig?.ErpMappingKey?.EndsWith(":VendorRef", StringComparison.OrdinalIgnoreCase) == true
+                               ? 0 : 1)
+                .ThenBy(f => f.FieldMappingConfig?.DisplayOrder ?? int.MaxValue);
+
+            foreach (var field in rowFields)
+            {
+                var config = field.FieldMappingConfig;
+                if (config is null) continue;
+
+                fieldResults.Clear();
+                var fieldDto  = MapFieldDto(field);
+                var configDto = MapConfigDto(config);
+
+                foreach (var validator in _validators)
+                {
+                    bool shouldRun = validator.RunForAllFields ||
+                        (!string.IsNullOrWhiteSpace(config.ErpMappingKey) &&
+                         validator.CanHandle(config.ErpMappingKey));
+                    if (!shouldRun) continue;
+                    if (validator.RequiresCategory.HasValue && validator.RequiresCategory.Value != docCategory)
+                        continue;
+
+                    FieldValidationResult vResult;
+                    try { vResult = await validator.ValidateAsync(fieldDto, configDto, ct); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Validator {V} failed for field {F} — recording as Warning",
+                            validator.GetType().Name, field.FieldName);
+                        vResult = new FieldValidationResult("Warning",
+                            $"Validation check unavailable ({validator.GetType().Name}).",
+                            validator.GetType().Name.Replace("Validator", ""));
+                    }
+
+                    var dbResult = new Domain.Entities.ValidationResult
+                    {
+                        DocumentId       = documentId,
+                        ExtractedFieldId = field.Id,
+                        FieldName        = field.FieldName,
+                        ValidationType   = vResult.ValidationType,
+                        Status           = Enum.Parse<ValidationStatus>(vResult.Status),
+                        Message          = vResult.Message,
+                        ErpReference     = vResult.ErpReference is not null ? JsonSerializer.Serialize(vResult.ErpReference) : null,
+                        ErpResponseField = configDto.ErpResponseField,
+                        ValidatedAt      = DateTimeOffset.UtcNow
+                    };
+                    fieldResults.Add(dbResult);
+                    resultDtos.Add(new ValidationResultDto(
+                        Guid.NewGuid(), documentId, field.Id, field.FieldName,
+                        vResult.ValidationType, vResult.Status, vResult.Message,
+                        vResult.ErpReference, configDto.ErpResponseField, dbResult.ValidatedAt));
+                }
+
+                if (fieldResults.Count > 0)
+                {
+                    await _validationRepo.AddRangeAsync(fieldResults, ct);
+                    results.AddRange(fieldResults);
+                }
+            }
+        }
+
+        int passed   = resultDtos.Count(r => r.Status == "Passed");
+        int failed   = resultDtos.Count(r => r.Status == "Failed");
         int warnings = resultDtos.Count(r => r.Status == "Warning");
 
         return new ValidationSummary(documentId, resultDtos.Count, passed, failed, warnings, failed == 0, resultDtos);
@@ -425,6 +632,110 @@ public class ValidationService : IValidationService
         }
     }
 
+    public async Task<IReadOnlyList<ValidationResultDto>> ValidateRowAsync(
+        Guid documentId, IReadOnlyList<Guid> fieldIds, CancellationToken ct = default)
+    {
+        var ocrResult = await _ocrRepo.GetByDocumentIdAsync(documentId, ct);
+        if (ocrResult is null) return [];
+
+        var rowFields = ocrResult.ExtractedFields
+            .Where(f => fieldIds.Contains(f.Id))
+            // Process ApInvoiceNbr first so ErpApInvoiceValidator populates the invoice cache
+            // and ResolvedVendorId before DynamicErpValidator runs cross-field checks.
+            // Without this, Date/Amount fields validated first fall to LookupGenericAsync (2 calls).
+            .OrderBy(f => f.FieldMappingConfig?.ErpMappingKey == "ApInvoiceNbr" ? 0 : 1)
+            .ThenBy(f => f.FieldMappingConfig?.DisplayOrder ?? int.MaxValue)
+            .ToList();
+
+        if (rowFields.Count == 0) return [];
+
+        // Resolve document category for category-specific validator gating.
+        var doc = await _docRepo.GetByIdAsync(documentId, ct);
+        var docCategory = DocumentCategoryEnum.General;
+        if (doc?.DocumentTypeId is not null)
+        {
+            var docType = await _fieldMappingRepo.GetDocumentTypeByIdAsync(doc.DocumentTypeId.Value, ct);
+            if (docType is not null) docCategory = docType.Category;
+        }
+
+        // Activate invoice caching so ErpApInvoiceValidator populates it and
+        // DynamicErpValidator reuses it without a second ERP call.
+        _invoiceContext.IsRowValidation = true;
+
+        // Build field value context: start from all extracted fields, then override with this row's values.
+        var allFieldValues = BuildFieldValues(ocrResult.ExtractedFields);
+        var rowValues = new Dictionary<string, string>(allFieldValues, StringComparer.OrdinalIgnoreCase);
+        foreach (var f in rowFields)
+        {
+            var v = f.CorrectedValue ?? f.NormalizedValue ?? f.RawValue;
+            if (v is not null) rowValues[f.FieldName] = v;
+        }
+        _fieldContext.SetFieldValues(rowValues);
+        _fieldContext.SetFieldErpKeys(BuildFieldErpKeys(ocrResult.ExtractedFields));
+
+        // Pre-populate vendor context from previously saved validation results.
+        await PrePopulateVendorContextAsync(documentId, ct);
+
+        // Delete existing results for these fields.
+        foreach (var fieldId in fieldIds)
+            await _validationRepo.DeleteByExtractedFieldIdAsync(fieldId, ct);
+
+        var results = new List<Domain.Entities.ValidationResult>();
+        var resultDtos = new List<ValidationResultDto>();
+
+        foreach (var field in rowFields)
+        {
+            var config = field.FieldMappingConfig;
+            if (config is null) continue;
+
+            var fieldDto = MapFieldDto(field);
+            var configDto = MapConfigDto(config);
+
+            foreach (var validator in _validators)
+            {
+                bool shouldRun = validator.RunForAllFields ||
+                    (!string.IsNullOrWhiteSpace(config.ErpMappingKey) &&
+                     validator.CanHandle(config.ErpMappingKey));
+                if (!shouldRun) continue;
+
+                if (validator.RequiresCategory.HasValue && validator.RequiresCategory.Value != docCategory)
+                    continue;
+
+                FieldValidationResult vResult;
+                try { vResult = await validator.ValidateAsync(fieldDto, configDto, ct); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Validator {V} failed for field {F} — recording as Warning",
+                        validator.GetType().Name, field.FieldName);
+                    vResult = new FieldValidationResult("Warning",
+                        $"Validation check unavailable ({validator.GetType().Name}).",
+                        validator.GetType().Name.Replace("Validator", ""));
+                }
+
+                var dbResult = new Domain.Entities.ValidationResult
+                {
+                    DocumentId       = documentId,
+                    ExtractedFieldId = field.Id,
+                    FieldName        = field.FieldName,
+                    ValidationType   = vResult.ValidationType,
+                    Status           = Enum.Parse<ValidationStatus>(vResult.Status),
+                    Message          = vResult.Message,
+                    ErpReference     = vResult.ErpReference is not null ? JsonSerializer.Serialize(vResult.ErpReference) : null,
+                    ErpResponseField = configDto.ErpResponseField,
+                    ValidatedAt      = DateTimeOffset.UtcNow
+                };
+                results.Add(dbResult);
+                resultDtos.Add(new ValidationResultDto(
+                    Guid.NewGuid(), documentId, field.Id, field.FieldName,
+                    vResult.ValidationType, vResult.Status, vResult.Message,
+                    vResult.ErpReference, configDto.ErpResponseField, dbResult.ValidatedAt));
+            }
+        }
+
+        await _validationRepo.AddRangeAsync(results, ct);
+        return resultDtos;
+    }
+
     /// <summary>
     /// Reads saved vendor-name validation results and pre-populates IVendorResolutionContext.
     /// Used in single-field validation so invoice validators can see whether vendor previously failed.
@@ -432,23 +743,82 @@ public class ValidationService : IValidationService
     private async Task PrePopulateVendorContextAsync(Guid documentId, CancellationToken ct)
     {
         var saved = await _validationRepo.GetByDocumentIdAsync(documentId, ct);
-        var vendorResult = saved.FirstOrDefault(r => r.ValidationType == "ErpVendorName");
-        if (vendorResult is null) return;
 
-        if (vendorResult.Status == Domain.Enums.ValidationStatus.Failed)
+        // ── Step 1: ErpVendorName (from ErpVendorNameValidator, ErpMappingKey = "VendorName") ──
+        var vendorResult = saved.FirstOrDefault(r => r.ValidationType == "ErpVendorName");
+        if (vendorResult?.Status == Domain.Enums.ValidationStatus.Failed)
         {
             _vendorContext.VendorValidationFailed = true;
+            return;
         }
-        else if (vendorResult.Status == Domain.Enums.ValidationStatus.Passed &&
-                 vendorResult.ErpReference is not null)
+        // Accept Passed and Warning (inactive vendor still has a valid VendorId).
+        if (vendorResult?.Status is Domain.Enums.ValidationStatus.Passed or Domain.Enums.ValidationStatus.Warning &&
+            vendorResult.ErpReference is not null &&
+            TryParseVendorId(vendorResult.ErpReference, out var vid1))
+        {
+            _vendorContext.ResolvedVendorId = vid1;
+            return;
+        }
+
+        // ── Step 2: DynamicErp results that contain a VendorId property ──
+        // Covers Vendor:VendorName mapping (stores VendorDto) and Bill:VendorRef with
+        // DependentFieldKey (stores ApInvoiceDto). Both have "VendorId" in JSON.
+        // Cross-field bill dicts use "Vendor" not "VendorId", so they are naturally excluded.
+        foreach (var r in saved
+            .Where(r => r.ValidationType == "DynamicErp" &&
+                        r.Status == Domain.Enums.ValidationStatus.Passed &&
+                        r.ErpReference is not null)
+            .OrderByDescending(r => r.ValidatedAt))
+        {
+            if (TryParseVendorId(r.ErpReference!, out var vid2))
+            {
+                _vendorContext.ResolvedVendorId = vid2;
+                return;
+            }
+        }
+
+        // ── Step 3: ErpApInvoice results (from ErpApInvoiceValidator) ──
+        // Priority 2 stores ApInvoiceDto ("VendorId" key).
+        // Priority 1 stores raw Acumatica dict ("Vendor" key) — try both.
+        var invoiceResult = saved
+            .Where(r => r.ValidationType == "ErpApInvoice" &&
+                        r.Status == Domain.Enums.ValidationStatus.Passed &&
+                        r.ErpReference is not null)
+            .OrderByDescending(r => r.ValidatedAt)
+            .FirstOrDefault();
+
+        if (invoiceResult is not null)
         {
             try
             {
-                using var doc = System.Text.Json.JsonDocument.Parse(vendorResult.ErpReference);
-                if (doc.RootElement.TryGetProperty("VendorId", out var vid))
-                    _vendorContext.ResolvedVendorId = vid.GetString();
+                using var doc = System.Text.Json.JsonDocument.Parse(invoiceResult.ErpReference!);
+                string? resolvedId = null;
+                if (doc.RootElement.TryGetProperty("VendorId", out var v) && !string.IsNullOrWhiteSpace(v.GetString()))
+                    resolvedId = v.GetString();
+                else if (doc.RootElement.TryGetProperty("Vendor", out var v2) && !string.IsNullOrWhiteSpace(v2.GetString()))
+                    resolvedId = v2.GetString();
+                if (!string.IsNullOrWhiteSpace(resolvedId))
+                    _vendorContext.ResolvedVendorId = resolvedId;
             }
             catch { /* ignore malformed JSON */ }
         }
+    }
+
+    /// <summary>Parses a JSON ERP reference and extracts the "VendorId" string if present and non-empty.</summary>
+    private static bool TryParseVendorId(string erpReference, out string vendorId)
+    {
+        vendorId = string.Empty;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(erpReference);
+            if (doc.RootElement.TryGetProperty("VendorId", out var prop) &&
+                !string.IsNullOrWhiteSpace(prop.GetString()))
+            {
+                vendorId = prop.GetString()!;
+                return true;
+            }
+        }
+        catch { /* ignore malformed JSON */ }
+        return false;
     }
 }

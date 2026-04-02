@@ -21,14 +21,16 @@ public class ErpController : ControllerBase
     private readonly IAuditService _audit;
     private readonly ICurrentUserContext _user;
     private readonly IMemoryCache _cache;
+    private readonly IConfiguration _config;
 
-    public ErpController(IErpIntegrationService erp, IDocumentService documents, IAuditService audit, ICurrentUserContext user, IMemoryCache cache)
+    public ErpController(IErpIntegrationService erp, IDocumentService documents, IAuditService audit, ICurrentUserContext user, IMemoryCache cache, IConfiguration config)
     {
         _erp = erp;
         _documents = documents;
         _audit = audit;
         _user = user;
         _cache = cache;
+        _config = config;
     }
 
     [HttpPost("{documentId:guid}/push")]
@@ -180,6 +182,44 @@ public class ErpController : ControllerBase
         if (string.IsNullOrWhiteSpace(entity)) return BadRequest("entity is required.");
         var result = await _erp.ProbeEntityAsync(entity, ct);
         return Ok(result);
+    }
+
+    /// <summary>
+    /// Diagnostic probe for APAging GI. Returns raw rows and the exact URL sent to Acumatica.
+    /// </summary>
+    [HttpGet("probe/ap-aging")]
+    public async Task<IActionResult> ProbeApAging(
+        [FromQuery] string? branchId, [FromQuery] string? vendorId,
+        [FromQuery] string? ageDate, CancellationToken ct)
+    {
+        var date        = DateTimeOffset.TryParse(ageDate, out var d) ? d : DateTimeOffset.UtcNow;
+        var baseUrl     = _config["Acumatica:BaseUrl"] ?? "";
+        var apiEndpoint = _config["Acumatica:ApiEndpoint"] ?? "Default";
+        var apiVersion  = _config["Acumatica:ApiVersion"] ?? "24.200.001";
+        var ageDateStr  = date.ToString("yyyy-MM-dd");
+        var putUrl      = $"{baseUrl}/entity/{apiEndpoint}/{apiVersion}/APAging";
+        var getUrl      = $"{baseUrl}/entity/{apiEndpoint}/{apiVersion}/APAging";
+
+        try
+        {
+            var rows = await _erp.FetchApAgingGiAsync(branchId, vendorId, date, ct);
+            return Ok(new { putUrl, getUrl, rowCount = rows.Count, rows });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { putUrl, getUrl, rowCount = 0, rows = Array.Empty<object>(), error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Returns the configured Acumatica base URL so the frontend can construct deep links
+    /// to ERP records (e.g. Bills, Vendors, Branches) directly from validation results.
+    /// </summary>
+    [HttpGet("acumatica-base-url")]
+    public IActionResult GetAcumaticaBaseUrl()
+    {
+        var baseUrl = _config["Acumatica:BaseUrl"] ?? "";
+        return Ok(new { baseUrl });
     }
 
     [HttpGet("lookup/branches")]

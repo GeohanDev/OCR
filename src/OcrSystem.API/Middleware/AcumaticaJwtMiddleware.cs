@@ -25,6 +25,7 @@ public class AcumaticaJwtMiddleware
         HttpContext   context,
         ICurrentUserContext currentUser,
         IAcumaticaTokenContext tokenContext,
+        IAcumaticaSessionService sessionService,
         UserRepository userRepo)
     {
         // Capture the forwarded Acumatica token so AcumaticaClient can use it
@@ -74,6 +75,25 @@ public class AcumaticaJwtMiddleware
 
                 mutableCtx.IpAddress = context.Connection.RemoteIpAddress?.ToString();
                 mutableCtx.UserAgent = context.Request.Headers.UserAgent.ToString();
+
+                // ── Acumatica session activity tracking ──────────────────────
+                // Only applies to requests that forward an Acumatica token.
+                if (!string.IsNullOrWhiteSpace(forwarded) && currentUser.UserId != Guid.Empty)
+                {
+                    if (sessionService.IsTimedOut(currentUser.UserId))
+                    {
+                        // Session was previously active but has expired due to inactivity.
+                        // Mark the token context so AcumaticaClient throws on the next ERP call.
+                        tokenContext.SessionTimedOut = true;
+                        _logger.LogInformation(
+                            "Acumatica session timed out for user {UserId}", currentUser.UserId);
+                    }
+                    else
+                    {
+                        // Refresh the sliding inactivity window.
+                        sessionService.RecordActivity(currentUser.UserId);
+                    }
+                }
             }
             catch (Exception ex)
             {

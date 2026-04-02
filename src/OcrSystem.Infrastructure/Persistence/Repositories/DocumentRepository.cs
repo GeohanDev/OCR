@@ -33,13 +33,23 @@ public class DocumentRepository
             .Include(d => d.Vendor)
             .AsQueryable();
 
+        bool isAdmin   = query.RequestingUserRole.Equals("Admin",   StringComparison.OrdinalIgnoreCase);
         bool isManager = query.RequestingUserRole.Equals("Manager", StringComparison.OrdinalIgnoreCase);
-        bool isAdmin = query.RequestingUserRole.Equals("Admin", StringComparison.OrdinalIgnoreCase);
 
-        if (!isManager && !isAdmin)
-            q = q.Where(d => d.UploadedBy == query.RequestingUserId);
-        else if (isManager && query.BranchId.HasValue)
-            q = q.Where(d => d.BranchId == query.BranchId);
+        // Branch restricts by document's own branch_id OR, for historical docs without one,
+        // by the uploading user's branch (covers docs uploaded before branch sync).
+        if (isAdmin)
+        {
+            // Admins see all documents — no branch restriction.
+        }
+        else if (query.BranchId.HasValue)
+        {
+            var bid = query.BranchId.Value;
+            q = q.Where(d => d.BranchId == bid ||
+                             (d.BranchId == null &&
+                              _db.Users.Any(u => u.Id == d.UploadedBy && u.BranchId == bid)));
+        }
+        // else: BranchId is null ("All Branches") → no restriction.
 
         if (!string.IsNullOrWhiteSpace(query.Status) && Enum.TryParse<DocumentStatus>(query.Status, out var status))
             q = q.Where(d => d.Status == status);
@@ -60,6 +70,17 @@ public class DocumentRepository
 
         if (query.VendorId.HasValue)
             q = q.Where(d => d.VendorId == query.VendorId.Value);
+
+        if (!string.IsNullOrWhiteSpace(query.VendorName))
+            q = q.Where(d => d.VendorName != null && EF.Functions.ILike(d.VendorName, $"%{query.VendorName}%"));
+
+        if (query.FilterBranchId.HasValue)
+        {
+            var fid = query.FilterBranchId.Value;
+            q = q.Where(d => d.BranchId == fid ||
+                             (d.BranchId == null &&
+                              _db.Users.Any(u => u.Id == d.UploadedBy && u.BranchId == fid)));
+        }
 
         if (query.DocumentTypeId.HasValue)
             q = q.Where(d => d.DocumentTypeId == query.DocumentTypeId.Value);
@@ -114,6 +135,26 @@ public class DocumentRepository
         doc.DeletedAt = null;
         await _db.SaveChangesAsync(ct);
         return true;
+    }
+
+    public async Task SetValidatingAsync(Guid id, bool isValidating, CancellationToken ct = default)
+    {
+        await _db.Documents
+            .Where(d => d.Id == id)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.IsValidating, isValidating), ct);
+    }
+
+    /// <summary>
+    /// Sets branch_id on all unassigned documents uploaded by the given user.
+    /// Called when a user's branch is assigned or changed via user management or sync.
+    /// Only fills in documents that have no branch yet to avoid overwriting explicit assignments.
+    /// </summary>
+    public async Task UpdateBranchForUserAsync(Guid userId, Guid? branchId, CancellationToken ct = default)
+    {
+        if (branchId is null) return; // null = All Branches — don't wipe existing assignments
+        await _db.Documents
+            .Where(d => d.UploadedBy == userId && d.BranchId == null && !d.IsDeleted)
+            .ExecuteUpdateAsync(s => s.SetProperty(d => d.BranchId, branchId), ct);
     }
 
     public async Task<int> PurgeExpiredAsync(DateTimeOffset cutoff, CancellationToken ct = default)

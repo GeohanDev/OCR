@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using Hangfire;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using OcrSystem.Application.Audit;
@@ -7,7 +8,11 @@ using OcrSystem.Application.Auth;
 using OcrSystem.Application.Commands;
 using OcrSystem.Application.Documents;
 using OcrSystem.Application.Validation;
+using OcrSystem.Domain.Entities;
 using OcrSystem.Domain.Enums;
+using OcrSystem.Application.ERP;
+using OcrSystem.Infrastructure.Persistence.Repositories;
+using OcrSystem.Infrastructure.Validation;
 
 namespace OcrSystem.API.Controllers;
 
@@ -21,19 +26,31 @@ public class ValidationController : ControllerBase
     private readonly IAuditService _audit;
     private readonly ICurrentUserContext _user;
     private readonly IAcumaticaTokenContext _tokenContext;
+    private readonly IBackgroundJobClient _jobs;
+    private readonly DocumentRepository _docRepo;
+    private readonly ValidationQueueRepository _queueRepo;
+    private readonly IValidationCancellationService _cancellation;
 
     public ValidationController(
         IValidationService validation,
         IDocumentService documents,
         IAuditService audit,
         ICurrentUserContext user,
-        IAcumaticaTokenContext tokenContext)
+        IAcumaticaTokenContext tokenContext,
+        IBackgroundJobClient jobs,
+        DocumentRepository docRepo,
+        ValidationQueueRepository queueRepo,
+        IValidationCancellationService cancellation)
     {
         _validation = validation;
         _documents = documents;
         _audit = audit;
         _user = user;
         _tokenContext = tokenContext;
+        _jobs = jobs;
+        _docRepo = docRepo;
+        _queueRepo = queueRepo;
+        _cancellation = cancellation;
     }
 
     /// <summary>
@@ -78,11 +95,98 @@ public class ValidationController : ControllerBase
         var sessionError = AcumaticaSessionCheck();
         if (sessionError is not null) return sessionError;
 
-        var summary = await _validation.ValidateDocumentAsync(documentId, ct);
-        await _audit.LogAsync("ValidationRun", _user.UserId, documentId,
-            afterValue: new { summary.TotalFields, summary.PassedCount, summary.FailedCount },
-            ipAddress: _user.IpAddress, userAgent: _user.UserAgent, ct: ct);
-        return Ok(summary);
+        try
+        {
+            var summary = await _validation.ValidateDocumentAsync(documentId, ct);
+            await _audit.LogAsync("ValidationRun", _user.UserId, documentId,
+                afterValue: new { summary.TotalFields, summary.PassedCount, summary.FailedCount },
+                ipAddress: _user.IpAddress, userAgent: _user.UserAgent, ct: ct);
+            return Ok(summary);
+        }
+        catch (AcumaticaAuthException)
+        {
+            return StatusCode(424, new { acumaticaSessionExpired = true,
+                message = "Acumatica session has expired. Please sign out and sign in again." });
+        }
+    }
+
+    [HttpPost("{documentId:guid}/enqueue")]
+    public async Task<IActionResult> Enqueue(Guid documentId, CancellationToken ct)
+    {
+        var sessionError = AcumaticaSessionCheck();
+        if (sessionError is not null) return sessionError;
+
+        var doc = await _docRepo.GetByIdAsync(documentId, ct);
+        if (doc is null) return NotFound();
+
+        var token = _tokenContext.ForwardedToken;
+
+        var queueItem = new ValidationQueueItem
+        {
+            DocumentId   = documentId,
+            DocumentName = doc.OriginalFilename,
+            AcumaticaToken = token,
+            CreatedAt    = DateTimeOffset.UtcNow
+        };
+        await _queueRepo.AddAsync(queueItem, ct);
+
+        await _docRepo.SetValidatingAsync(documentId, true, ct);
+
+        _jobs.Enqueue<ValidationJobDispatcher>(d => d.ValidateAsync(documentId, token, queueItem.Id));
+
+        return Accepted(new { status = "queued", documentId, queueItemId = queueItem.Id });
+    }
+
+    [HttpPost("{documentId:guid}/enqueue-table")]
+    public async Task<IActionResult> EnqueueTable(Guid documentId, CancellationToken ct)
+    {
+        var sessionError = AcumaticaSessionCheck();
+        if (sessionError is not null) return sessionError;
+
+        var doc = await _docRepo.GetByIdAsync(documentId, ct);
+        if (doc is null) return NotFound();
+
+        var token = _tokenContext.ForwardedToken;
+
+        var queueItem = new ValidationQueueItem
+        {
+            DocumentId    = documentId,
+            DocumentName  = doc.OriginalFilename,
+            AcumaticaToken = token,
+            CreatedAt     = DateTimeOffset.UtcNow
+        };
+        await _queueRepo.AddAsync(queueItem, ct);
+        await _docRepo.SetValidatingAsync(documentId, true, ct);
+
+        _jobs.Enqueue<ValidationJobDispatcher>(d => d.ValidateTableAsync(documentId, token, queueItem.Id));
+
+        return Accepted(new { status = "queued", documentId, queueItemId = queueItem.Id });
+    }
+
+    [HttpPost("{documentId:guid}/stop")]
+    public async Task<IActionResult> Stop(Guid documentId, CancellationToken ct)
+    {
+        _cancellation.Cancel(documentId);
+        await _docRepo.SetValidatingAsync(documentId, false, ct);
+        await _queueRepo.CancelPendingAsync(documentId, ct);
+        return Ok(new { status = "stopped" });
+    }
+
+    [HttpGet("queue")]
+    public async Task<IActionResult> GetQueue(CancellationToken ct)
+    {
+        var items = await _queueRepo.GetRecentAsync(20, ct);
+        return Ok(items.Select(i => new
+        {
+            i.Id,
+            i.DocumentId,
+            i.DocumentName,
+            status = i.Status.ToString(),
+            i.CreatedAt,
+            i.StartedAt,
+            i.CompletedAt,
+            i.ErrorMessage
+        }));
     }
 
     [HttpPost("{documentId:guid}/field/{fieldId:guid}")]
@@ -91,8 +195,37 @@ public class ValidationController : ControllerBase
         var sessionError = AcumaticaSessionCheck();
         if (sessionError is not null) return sessionError;
 
-        var results = await _validation.ValidateFieldAsync(documentId, fieldId, ct);
-        return Ok(results);
+        try
+        {
+            var results = await _validation.ValidateFieldAsync(documentId, fieldId, ct);
+            return Ok(results);
+        }
+        catch (AcumaticaAuthException)
+        {
+            return StatusCode(424, new { acumaticaSessionExpired = true,
+                message = "Acumatica session has expired. Please sign out and sign in again." });
+        }
+    }
+
+    [HttpPost("{documentId:guid}/row")]
+    public async Task<IActionResult> ValidateRow(
+        Guid documentId,
+        [FromBody] ValidateRowRequest request,
+        CancellationToken ct)
+    {
+        var sessionError = AcumaticaSessionCheck();
+        if (sessionError is not null) return sessionError;
+
+        try
+        {
+            var results = await _validation.ValidateRowAsync(documentId, request.FieldIds, ct);
+            return Ok(results);
+        }
+        catch (AcumaticaAuthException)
+        {
+            return StatusCode(424, new { acumaticaSessionExpired = true,
+                message = "Acumatica session has expired. Please sign out and sign in again." });
+        }
     }
 
     [HttpGet("{documentId:guid}/results")]
@@ -136,3 +269,5 @@ public class ValidationController : ControllerBase
 }
 
 public record ApproveRejectRequest(string? Notes);
+
+public record ValidateRowRequest(IReadOnlyList<Guid> FieldIds);

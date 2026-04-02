@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using OcrSystem.API.Extensions;
 using OcrSystem.API.Middleware;
 using OcrSystem.Application.Auth;
+using OcrSystem.Application.CashFlow;
 using OcrSystem.Application.Storage;
 using OcrSystem.Application.Trash;
 using OcrSystem.Infrastructure.Persistence;
@@ -94,6 +95,63 @@ using (var scope = app.Services.CreateScope())
     db.Database.ExecuteSqlRaw(
         "CREATE INDEX IF NOT EXISTS IX_documents_vendor_id ON documents (vendor_id);");
 
+    // Vendor aging snapshots table — safety net
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS vendor_aging_snapshots (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            vendor_local_id VARCHAR(500) NOT NULL,
+            acumatica_vendor_id VARCHAR(100),
+            vendor_name VARCHAR(500) NOT NULL,
+            snapshot_date DATE NOT NULL,
+            current_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+            aging_30 NUMERIC(18,2) NOT NULL DEFAULT 0,
+            aging_60 NUMERIC(18,2) NOT NULL DEFAULT 0,
+            aging_90_plus NUMERIC(18,2) NOT NULL DEFAULT 0,
+            total_outstanding NUMERIC(18,2) NOT NULL DEFAULT 0,
+            captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS IX_vendor_aging_snapshots_snapshot_date ON vendor_aging_snapshots (snapshot_date);");
+
+    // Vendor aging snapshots — SnapshotKind / StatementDate / Aging90 columns (2026-03-24)
+    db.Database.ExecuteSqlRaw(
+        "ALTER TABLE vendor_aging_snapshots ADD COLUMN IF NOT EXISTS snapshot_kind INT NOT NULL DEFAULT 0;");
+    db.Database.ExecuteSqlRaw(
+        "ALTER TABLE vendor_aging_snapshots ADD COLUMN IF NOT EXISTS statement_date DATE;");
+    db.Database.ExecuteSqlRaw(
+        "ALTER TABLE vendor_aging_snapshots ADD COLUMN IF NOT EXISTS aging_90 NUMERIC(18,2) NOT NULL DEFAULT 0;");
+    // Vendor aging snapshots — SnapshotBranchId column for Kind 1 per-branch rows (2026-03-31)
+    db.Database.ExecuteSqlRaw(
+        "ALTER TABLE vendor_aging_snapshots ADD COLUMN IF NOT EXISTS snapshot_branch_id VARCHAR(100);");
+    db.Database.ExecuteSqlRaw(@"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_indexes
+                WHERE tablename = 'vendor_aging_snapshots'
+                AND indexname = 'ix_vendor_aging_snapshots_snapshot_date_snapshot_kind'
+            ) THEN
+                CREATE INDEX ix_vendor_aging_snapshots_snapshot_date_snapshot_kind
+                    ON vendor_aging_snapshots (snapshot_date, snapshot_kind);
+            END IF;
+        END $$;");
+
+    // Validation queue table — safety net (2026-03-25)
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS validation_queue (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            document_name VARCHAR(500) NOT NULL,
+            status VARCHAR(50) NOT NULL DEFAULT 'Pending',
+            acumatica_token TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            started_at TIMESTAMPTZ,
+            completed_at TIMESTAMPTZ,
+            error_message TEXT
+        );
+        CREATE INDEX IF NOT EXISTS IX_validation_queue_document_id ON validation_queue(document_id);
+        CREATE INDEX IF NOT EXISTS IX_validation_queue_status ON validation_queue(status);
+        CREATE INDEX IF NOT EXISTS IX_validation_queue_created_at ON validation_queue(created_at);");
+
     // Trash columns — safety net in case migration didn't apply
     db.Database.ExecuteSqlRaw(
         "ALTER TABLE documents ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;");
@@ -168,6 +226,16 @@ using (var scope = app.Services.CreateScope())
                  0.70, {f.Order}, true, NOW(), NOW())
             ON CONFLICT DO NOTHING;";
         db.Database.ExecuteSqlRaw(sql);
+    }
+
+    // Protected admin account — ensure it stays active and is Admin role on every startup
+    var protectedAdmin = app.Configuration["LocalAdmin:Username"];
+    if (!string.IsNullOrWhiteSpace(protectedAdmin))
+    {
+        db.Database.ExecuteSqlRaw($@"
+            UPDATE users
+            SET is_active = true, role = 2, updated_at = NOW()
+            WHERE username = '{protectedAdmin.Replace("'", "''")}';");
     }
 
     // Refresh vendor_name on all documents from their latest extracted vendorName OCR field
@@ -253,6 +321,12 @@ RecurringJob.AddOrUpdate<ITrashPurgeService>(
     "purge-trash-daily",
     svc => svc.PurgeExpiredAsync(CancellationToken.None),
     "0 3 * * *");
+
+// Capture AP aging snapshot daily at 07:00 UTC (before 8am local)
+RecurringJob.AddOrUpdate<IAgingSnapshotService>(
+    "capture-aging-snapshot-daily",
+    svc => svc.CaptureSnapshotAsync(false, null, CancellationToken.None),
+    "0 7 * * *");
 
 app.Run();
 

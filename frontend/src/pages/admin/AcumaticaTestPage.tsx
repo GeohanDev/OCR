@@ -106,6 +106,12 @@ export default function AcumaticaTestPage() {
   const [balPeriod,   setBalPeriod]   = useState('');
   const [balResult,   setBalResult]   = useState<LookupState>(EMPTY);
 
+  // APAging GI probe
+  const [apAgingBranchId, setApAgingBranchId] = useState('');
+  const [apAgingVendorId, setApAgingVendorId] = useState('');
+  const [apAgingDate,     setApAgingDate]     = useState('');
+  const [apAgingResult,   setApAgingResult]   = useState<LookupState>(EMPTY);
+
   // AP Invoice diagnostics
   const [apProbeResult,    setApProbeResult]    = useState<LookupState>(EMPTY);
   const [apRefNbr,         setApRefNbr]         = useState('');
@@ -949,6 +955,97 @@ export default function AcumaticaTestPage() {
               )}
               <pre className="text-xs font-mono bg-white/60 rounded p-3 border border-border/50 max-h-72 overflow-auto whitespace-pre-wrap break-all">
                 {JSON.stringify(balResult.error ?? result, null, 2)}
+              </pre>
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* ── APAging GI Probe ────────────────────────────────────────────────── */}
+      <div className="card space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold">APAging GI Probe</h2>
+          <p className="text-sm text-muted-foreground">
+            Fetch raw rows from the Acumatica APAging Generic Inquiry. All parameters are optional — leave blank to retrieve all rows.
+            Use this to inspect actual column names returned by the GI.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-3 items-end">
+          <div className="flex flex-col gap-1 flex-1 min-w-[140px]">
+            <label className="text-xs font-medium text-muted-foreground">Branch ID</label>
+            <input
+              className="input"
+              value={apAgingBranchId}
+              onChange={e => setApAgingBranchId(e.target.value)}
+              placeholder="e.g. GCORP"
+            />
+          </div>
+          <div className="flex flex-col gap-1 flex-1 min-w-[140px]">
+            <label className="text-xs font-medium text-muted-foreground">Vendor ID</label>
+            <input
+              className="input"
+              value={apAgingVendorId}
+              onChange={e => setApAgingVendorId(e.target.value)}
+              placeholder="e.g. V000001"
+            />
+          </div>
+          <div className="flex flex-col gap-1 flex-1 min-w-[140px]">
+            <label className="text-xs font-medium text-muted-foreground">Age Date</label>
+            <input
+              className="input"
+              type="date"
+              value={apAgingDate}
+              onChange={e => setApAgingDate(e.target.value)}
+            />
+          </div>
+          <button
+            className="btn-primary flex items-center gap-2 flex-shrink-0"
+            disabled={apAgingResult.loading}
+            onClick={() => withTokenCheck(() => runLookup(
+              () => erpApi.probeApAging(
+                apAgingBranchId.trim() || undefined,
+                apAgingVendorId.trim() || undefined,
+                apAgingDate || undefined,
+              ),
+              setApAgingResult,
+              onAuthError,
+            ))}
+          >
+            {apAgingResult.loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+            Probe APAging GI
+          </button>
+        </div>
+
+        {(apAgingResult.data !== null || apAgingResult.error) && (() => {
+          const result = apAgingResult.data as { requestUrl?: string; rowCount?: number; rows?: Record<string, unknown>[] } | null;
+          return (
+            <div className={`rounded-lg border p-4 space-y-3 ${apAgingResult.error ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'}`}>
+              {result?.requestUrl && (
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">OData URL sent to Acumatica</p>
+                  <code className="block text-xs font-mono bg-white/80 rounded p-2 border border-border/50 break-all">
+                    {result.requestUrl}
+                  </code>
+                </div>
+              )}
+              {apAgingResult.error ? (
+                <div className="flex items-center gap-2 text-red-700">
+                  <XCircle className="h-4 w-4 flex-shrink-0" />
+                  <span className="text-sm font-medium">Request failed</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-blue-700">
+                  <CheckCircle className="h-4 w-4 flex-shrink-0" />
+                  <span className="text-sm font-medium">
+                    {result?.rowCount ?? 0} row{(result?.rowCount ?? 0) !== 1 ? 's' : ''} returned
+                    {result?.rows && result.rows.length > 0 && (
+                      <> — columns: <code className="font-mono text-xs">{Object.keys(result.rows[0]).join(', ')}</code></>
+                    )}
+                  </span>
+                </div>
+              )}
+              <pre className="text-xs font-mono bg-white/60 rounded p-3 border border-border/50 max-h-96 overflow-auto whitespace-pre-wrap break-all">
+                {JSON.stringify(apAgingResult.error ?? result, null, 2)}
               </pre>
             </div>
           );

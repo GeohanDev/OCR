@@ -36,8 +36,9 @@ public class ClaudeFieldExtractionService : IClaudeFieldExtractionService
     private readonly string _primaryModel;
     private readonly string _fallbackModel;
 
-    // Send up to 20 000 chars of OCR text (~5 000 tokens) — covers 6–10 page statements.
-    private const int MaxRawTextChars = 20_000;
+    // Send up to 600 000 chars of OCR text (~150 000 tokens) — fits within Haiku's 200k context window
+    // after accounting for the prompt template and field config overhead (~10k tokens).
+    private const int MaxRawTextChars = 600_000;
 
     private const string AnthropicVersion = "2023-06-01";
 
@@ -74,12 +75,19 @@ public class ClaudeFieldExtractionService : IClaudeFieldExtractionService
             "Claude extraction (Step 5): extracting {Count} fields via {Model} ({Chars} chars of OCR text)",
             activeConfigs.Count, _primaryModel, truncated.Length);
 
-        var responseText = await CallClaudeAsync(prompt, _primaryModel, ct)
-                        ?? await CallClaudeAsync(prompt, _fallbackModel, ct);
+        var responseText = await CallClaudeAsync(prompt, _primaryModel, ct);
+        if (responseText is null)
+        {
+            _logger.LogWarning(
+                "Claude extraction: primary model {Model} returned no result — waiting 3 s before fallback",
+                _primaryModel);
+            await Task.Delay(3_000, ct);
+            responseText = await CallClaudeAsync(prompt, _fallbackModel, ct);
+        }
 
         if (responseText is null)
         {
-            _logger.LogWarning("Claude extraction returned no response; returning empty fields");
+            _logger.LogWarning("Claude extraction returned no response from either model; returning empty fields");
             return BuildEmptyFields(activeConfigs);
         }
 
@@ -170,43 +178,84 @@ public class ClaudeFieldExtractionService : IClaudeFieldExtractionService
 
     // ── HTTP call to Anthropic ────────────────────────────────────────────────
 
+    // Retry up to 3 times for transient Anthropic errors (429 rate-limit, 529 overloaded).
+    // Delays: 2 s, 4 s, 8 s.
+    private static readonly int[] RetryDelaysMs = [2_000, 4_000, 8_000];
+
     private async Task<string?> CallClaudeAsync(string prompt, string model, CancellationToken ct)
     {
-        try
+        for (int attempt = 0; attempt <= RetryDelaysMs.Length; attempt++)
         {
-            var requestBody = new JsonObject
+            try
             {
-                ["model"]      = model,
-                ["max_tokens"] = 4096,
-                ["messages"]   = new JsonArray
+                var requestBody = new JsonObject
                 {
-                    new JsonObject { ["role"] = "user", ["content"] = prompt }
+                    ["model"]      = model,
+                    ["max_tokens"] = 64000,
+                    ["messages"]   = new JsonArray
+                    {
+                        new JsonObject { ["role"] = "user", ["content"] = prompt }
+                    }
+                };
+
+                using var request = new HttpRequestMessage(HttpMethod.Post, "v1/messages")
+                {
+                    Content = new StringContent(requestBody.ToJsonString(), Encoding.UTF8, "application/json")
+                };
+                request.Headers.Add("x-api-key", _apiKey);
+                request.Headers.Add("anthropic-version", AnthropicVersion);
+
+                using var response = await _http.SendAsync(request, ct);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errBody = await response.Content.ReadAsStringAsync(ct);
+                    var status  = (int)response.StatusCode;
+
+                    // Transient: retry with backoff
+                    if ((status == 429 || status == 529) && attempt < RetryDelaysMs.Length)
+                    {
+                        _logger.LogWarning(
+                            "Claude API {Status} (transient) for model {Model} — retry {Attempt}/{Max} in {Delay} ms. Body: {Body}",
+                            status, model, attempt + 1, RetryDelaysMs.Length,
+                            RetryDelaysMs[attempt], errBody.Length > 300 ? errBody[..300] : errBody);
+                        await Task.Delay(RetryDelaysMs[attempt], ct);
+                        continue;
+                    }
+
+                    // Non-transient or retries exhausted
+                    _logger.LogWarning(
+                        "Claude API returned {Status} for model {Model} (attempt {Attempt}). Body: {Body}",
+                        status, model, attempt + 1,
+                        errBody.Length > 500 ? errBody[..500] : errBody);
+                    return null;
                 }
-            };
 
-            using var request = new HttpRequestMessage(HttpMethod.Post, "v1/messages")
+                var json        = await response.Content.ReadAsStringAsync(ct);
+                var apiResponse = JsonSerializer.Deserialize<ClaudeApiResponse>(json, JsonOpts);
+                return apiResponse?.Content?.FirstOrDefault(c => c.Type == "text")?.Text;
+            }
+            catch (TaskCanceledException) when (ct.IsCancellationRequested)
             {
-                Content = new StringContent(requestBody.ToJsonString(), Encoding.UTF8, "application/json")
-            };
-            request.Headers.Add("x-api-key", _apiKey);
-            request.Headers.Add("anthropic-version", AnthropicVersion);
-
-            using var response = await _http.SendAsync(request, ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("Claude API returned {Status} for model {Model}", response.StatusCode, model);
+                _logger.LogInformation("Claude API call cancelled for model {Model}", model);
                 return null;
             }
-
-            var json        = await response.Content.ReadAsStringAsync(ct);
-            var apiResponse = JsonSerializer.Deserialize<ClaudeApiResponse>(json, JsonOpts);
-            return apiResponse?.Content?.FirstOrDefault(c => c.Type == "text")?.Text;
+            catch (Exception ex)
+            {
+                if (attempt < RetryDelaysMs.Length)
+                {
+                    _logger.LogWarning(ex,
+                        "Claude API call threw for model {Model} — retry {Attempt}/{Max} in {Delay} ms",
+                        model, attempt + 1, RetryDelaysMs.Length, RetryDelaysMs[attempt]);
+                    await Task.Delay(RetryDelaysMs[attempt], ct);
+                    continue;
+                }
+                _logger.LogWarning(ex, "Claude API call failed for model {Model} after {Attempts} attempts",
+                    model, attempt + 1);
+                return null;
+            }
         }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Claude API call failed for model {Model}", model);
-            return null;
-        }
+        return null;
     }
 
     // ── Parse Claude JSON response → RawExtractedField list ──────────────────

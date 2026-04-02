@@ -20,6 +20,8 @@ public class AppDbContext : DbContext
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<SystemConfig> SystemConfigs => Set<SystemConfig>();
     public DbSet<Vendor> Vendors => Set<Vendor>();
+    public DbSet<VendorAgingSnapshot> VendorAgingSnapshots => Set<VendorAgingSnapshot>();
+    public DbSet<ValidationQueueItem> ValidationQueue => Set<ValidationQueueItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -161,6 +163,8 @@ public class AppDbContext : DbContext
             e.Property(x => x.VendorId).HasColumnName("vendor_id");
             e.Property(x => x.VendorName).HasColumnName("vendor_name").HasMaxLength(500);
             e.HasOne(x => x.Vendor).WithMany(v => v.Documents).HasForeignKey(x => x.VendorId).OnDelete(DeleteBehavior.SetNull);
+            e.Property(x => x.ReuploadRequired).HasColumnName("reupload_required").HasDefaultValue(false);
+            e.Property(x => x.IsValidating).HasColumnName("is_validating").HasDefaultValue(false);
         });
 
         modelBuilder.Entity<DocumentVersion>(e =>
@@ -254,6 +258,48 @@ public class AppDbContext : DbContext
             e.HasIndex(x => x.OccurredAt);
             e.HasOne(x => x.ActorUser).WithMany(u => u.AuditLogs).HasForeignKey(x => x.ActorUserId).OnDelete(DeleteBehavior.SetNull);
             e.HasOne(x => x.Document).WithMany(d => d.AuditLogs).HasForeignKey(x => x.DocumentId).OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<VendorAgingSnapshot>(e =>
+        {
+            e.ToTable("vendor_aging_snapshots");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.VendorLocalId).HasColumnName("vendor_local_id").HasMaxLength(500).IsRequired();
+            e.Property(x => x.AcumaticaVendorId).HasColumnName("acumatica_vendor_id").HasMaxLength(100);
+            e.Property(x => x.VendorName).HasColumnName("vendor_name").HasMaxLength(500).IsRequired();
+            e.Property(x => x.SnapshotDate).HasColumnName("snapshot_date");
+            e.Property(x => x.SnapshotKind).HasColumnName("snapshot_kind").HasDefaultValue(0);
+            e.Property(x => x.StatementDate).HasColumnName("statement_date");
+            e.Property(x => x.SnapshotBranchId).HasColumnName("snapshot_branch_id").HasMaxLength(100);
+            e.Property(x => x.Current).HasColumnName("current_amount").HasPrecision(18, 2);
+            e.Property(x => x.Aging30).HasColumnName("aging_30").HasPrecision(18, 2);
+            e.Property(x => x.Aging60).HasColumnName("aging_60").HasPrecision(18, 2);
+            e.Property(x => x.Aging90).HasColumnName("aging_90").HasPrecision(18, 2);
+            e.Property(x => x.Aging90Plus).HasColumnName("aging_90_plus").HasPrecision(18, 2);
+            e.Property(x => x.TotalOutstanding).HasColumnName("total_outstanding").HasPrecision(18, 2);
+            e.Property(x => x.CapturedAt).HasColumnName("captured_at");
+            e.HasIndex(x => x.SnapshotDate);
+            e.HasIndex(x => new { x.SnapshotDate, x.SnapshotKind });
+        });
+
+        modelBuilder.Entity<ValidationQueueItem>(e =>
+        {
+            e.ToTable("validation_queue");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.DocumentId).HasColumnName("document_id");
+            e.Property(x => x.DocumentName).HasColumnName("document_name").HasMaxLength(500).IsRequired();
+            e.Property(x => x.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(50).HasDefaultValue(ValidationQueueStatus.Pending);
+            e.Property(x => x.AcumaticaToken).HasColumnName("acumatica_token");
+            e.Property(x => x.CreatedAt).HasColumnName("created_at");
+            e.Property(x => x.StartedAt).HasColumnName("started_at");
+            e.Property(x => x.CompletedAt).HasColumnName("completed_at");
+            e.Property(x => x.ErrorMessage).HasColumnName("error_message");
+            e.HasIndex(x => x.DocumentId);
+            e.HasIndex(x => x.Status);
+            e.HasIndex(x => x.CreatedAt);
+            e.HasOne(x => x.Document).WithMany().HasForeignKey(x => x.DocumentId).OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<SystemConfig>(e =>

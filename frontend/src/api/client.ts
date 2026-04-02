@@ -16,10 +16,16 @@ apiClient.interceptors.request.use((config) => {
   const token = sessionStorage.getItem('access_token');
   if (token) config.headers.Authorization = `Bearer ${token}`;
 
-  // Forward the user's Acumatica token on ERP and validation requests.
-  // Validation runs call ERP validators internally, so they need the token too.
+  // Forward the user's Acumatica token on ERP, validation, vendor, and keepalive requests.
   const acumaticaToken = sessionStorage.getItem('acumatica_token');
-  if (acumaticaToken && (config.url?.includes('/erp/') || config.url?.includes('/validation/') || config.url?.includes('/vendors/'))) {
+  if (acumaticaToken && (
+    config.url?.includes('/erp/') ||
+    config.url?.includes('/validation/') ||
+    config.url?.includes('/vendors/') ||
+    config.url?.includes('/auth/acumatica/') ||
+    config.url?.includes('/branches/') ||
+    config.url?.includes('/cash-flow/')
+  )) {
     config.headers['X-Acumatica-Token'] = acumaticaToken;
   }
 
@@ -39,14 +45,29 @@ apiClient.interceptors.response.use(
       window.location.href = '/login';
     }
     if (error.response?.status === 424) {
-      sessionStorage.removeItem('access_token');
-      sessionStorage.removeItem('acumatica_token');
-      localStorage.setItem('auth-logged-out', '1');
-      window.location.href = '/login?error=session_expired';
+      // The keepalive endpoint handles 424 itself — skip global redirect for it.
+      if (!url.includes('/auth/acumatica/keepalive')) {
+        // Dispatch an event so AppShell can show the banner before redirecting.
+        window.dispatchEvent(new CustomEvent('acumatica-session-expired', {
+          detail: { reason: 'token_expired' }
+        }));
+        sessionStorage.removeItem('acumatica_token');
+        // Redirect after a short delay to let the banner render.
+        setTimeout(() => {
+          sessionStorage.removeItem('access_token');
+          localStorage.setItem('auth-logged-out', '1');
+          window.location.href = '/login?error=session_expired';
+        }, 3500);
+      }
     }
     return Promise.reject(error);
   }
 );
+
+// ── Auth ──────────────────────────────────────────────────────────────
+export const authApi = {
+  acumaticaKeepalive: () => apiClient.get('/auth/acumatica/keepalive'),
+};
 
 // ── Documents ──────────────────────────────────────────────────────────
 export const documentApi = {
@@ -67,6 +88,10 @@ export const documentApi = {
     apiClient.post(`/documents/${id}/versions`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
+  setReuploadRequired: (id: string, required: boolean) =>
+    apiClient.patch(`/documents/${id}/reupload-required`, { required }),
+  setValidating: (id: string, isValidating: boolean) =>
+    apiClient.patch(`/documents/${id}/validating`, { isValidating }),
 };
 
 // ── OCR ───────────────────────────────────────────────────────────────
@@ -83,14 +108,28 @@ export const ocrApi = {
     apiClient.patch(`/ocr/${documentId}/fields/${fieldId}`, { correctedValue }),
   deleteField: (documentId: string, fieldId: string) =>
     apiClient.delete(`/ocr/${documentId}/fields/${fieldId}`),
+  addTableRow: (documentId: string, columns: { fieldName: string; fieldMappingConfigId?: string }[]) =>
+    apiClient.post(`/ocr/${documentId}/table-row`, { columns }),
+  reExtractFields: (documentId: string) =>
+    apiClient.post(`/ocr/${documentId}/re-extract`),
 };
 
 // ── Validation ─────────────────────────────────────────────────────────
 export const validationApi = {
   run: (documentId: string) =>
     apiClient.post(`/validation/${documentId}/run`),
-  validateField: (documentId: string, fieldId: string) =>
-    apiClient.post(`/validation/${documentId}/field/${fieldId}`),
+  enqueue: (documentId: string) =>
+    apiClient.post(`/validation/${documentId}/enqueue`),
+  enqueueTable: (documentId: string) =>
+    apiClient.post(`/validation/${documentId}/enqueue-table`),
+  stop: (documentId: string) =>
+    apiClient.post(`/validation/${documentId}/stop`),
+  getQueue: () =>
+    apiClient.get('/validation/queue'),
+  validateField: (documentId: string, fieldId: string, signal?: AbortSignal) =>
+    apiClient.post(`/validation/${documentId}/field/${fieldId}`, undefined, { signal }),
+  validateRow: (documentId: string, fieldIds: string[], signal?: AbortSignal) =>
+    apiClient.post(`/validation/${documentId}/row`, { fieldIds }, { signal }),
   getResults: (documentId: string) =>
     apiClient.get(`/validation/${documentId}/results`),
   approve: (documentId: string, notes?: string) =>
@@ -115,6 +154,8 @@ export const erpApi = {
     apiClient.get('/erp/lookup/branches', { params: { branchCode } }),
   lookupApInvoice: (invoiceNbr: string) =>
     apiClient.get('/erp/lookup/ap-invoices', { params: { invoiceNbr } }),
+  getAcumaticaBaseUrl: () =>
+    apiClient.get<{ baseUrl: string }>('/erp/acumatica-base-url'),
   getErpEntities: () =>
     apiClient.get('/erp/entities'),
   getODataEntities: () =>
@@ -125,6 +166,8 @@ export const erpApi = {
     apiClient.get('/erp/lookup/generic', { params: { entity, field, value } }),
   probeEntity: (entity: string) =>
     apiClient.get(`/erp/probe/${entity}`),
+  probeApAging: (branchId?: string, vendorId?: string, ageDate?: string) =>
+    apiClient.get('/erp/probe/ap-aging', { params: { branchId, vendorId, ageDate } }),
   lookupVendorBalance: (vendorId: string, period: string) =>
     apiClient.get('/erp/lookup/vendor-balance', { params: { vendorId, period } }),
   lookupOpenBills: (vendorId: string) =>
@@ -159,6 +202,42 @@ export const dashboardApi = {
     apiClient.get('/audit/logs', { params }),
 };
 
+// ── Cash Flow ─────────────────────────────────────────────────────────
+export const cashFlowApi = {
+  getAging: () => apiClient.get('/cash-flow/aging'),
+  getDocumentVendorAging: (documentId: string) =>
+    apiClient.get(`/cash-flow/aging/document/${documentId}`),
+  getSnapshot: (branchId?: string) => apiClient.get('/cash-flow/aging/snapshot', { params: branchId ? { branchId } : undefined }),
+  refreshSnapshot: () => apiClient.post('/cash-flow/aging/snapshot'),
+  getCaptureProgress: () => apiClient.get('/cash-flow/aging/snapshot/progress'),
+  exportAgingReport: (reportDate?: string) =>
+    apiClient.get('/cash-flow/aging/report', {
+      params: reportDate ? { reportDate } : undefined,
+      responseType: 'blob',
+    }),
+  exportForecastReport: () =>
+    apiClient.get('/cash-flow/forecast/report', { responseType: 'blob' }),
+};
+
+// ── Export ────────────────────────────────────────────────────────────
+export const exportApi = {
+  exportDocumentsCsv: (params?: Record<string, unknown>) =>
+    apiClient.get('/export/documents', { params, responseType: 'blob' }),
+  exportDocumentDataCsv: (params?: Record<string, unknown>) =>
+    apiClient.get('/export/documents/data', { params, responseType: 'blob' }),
+  exportZipByVendor: (params?: Record<string, unknown>) =>
+    apiClient.get('/export/documents/zip', { params, responseType: 'blob' }),
+  getDocumentFileUrl: (id: string) =>
+    apiClient.get<{ url: string }>(`/export/documents/${id}/file`),
+};
+
+// ── Branches ──────────────────────────────────────────────────────────
+export const branchApi = {
+  list: () => apiClient.get<{ id: string; branchCode: string; branchName: string; acumaticaBranchId: string; syncedAt: string }[]>('/branches'),
+  sync: () => apiClient.post<{ syncedCount: number }>('/branches/sync'),
+  getErpData: (branchCode: string) => apiClient.get(`/branches/${branchCode}/erp`),
+};
+
 // ── Vendors ───────────────────────────────────────────────────────────
 export const vendorApi = {
   list: (params?: Record<string, unknown>) =>
@@ -188,6 +267,8 @@ export const usersApi = {
     apiClient.patch(`/users/${id}/active`, { isActive }),
   setActive: (id: string, isActive: boolean) =>
     apiClient.patch(`/users/${id}/active`, { isActive }),
+  updateBranch: (id: string, branchId: string | null) =>
+    apiClient.patch(`/users/${id}/branch`, { branchId }),
   getAuditLogs: (params?: Record<string, unknown>) =>
     apiClient.get('/audit/logs', { params }),
 };

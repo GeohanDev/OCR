@@ -171,6 +171,7 @@ public class DocumentService : IDocumentService
         doc.StoragePath = storagePath;
         doc.FileHash = hash;
         doc.Status = DocumentStatus.Uploaded;
+        doc.ReuploadRequired = false; // cleared on every new version upload
         doc.Versions.Add(new DocumentVersion
         {
             DocumentId = documentId,
@@ -198,5 +199,6 @@ public class DocumentService : IDocumentService
         d.BranchId, d.Branch?.BranchName,
         d.UploadedAt, d.ProcessedAt, d.ReviewedAt, d.ApprovedAt, d.PushedAt,
         d.Notes, d.CurrentVersion,
-        d.VendorId, d.VendorName);
+        d.VendorId, d.VendorName,
+        d.ReuploadRequired, d.IsValidating);
 }

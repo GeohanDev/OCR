@@ -1,14 +1,14 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { documentApi, ocrApi, validationApi, configApi } from '../api/client';
+import { documentApi, ocrApi, validationApi, configApi, cashFlowApi } from '../api/client';
 // validationApi used for getResults + auto-revalidate after field edits
 import { useAuth } from '../contexts/AuthContext';
 import StatusBadge from '../components/ui/StatusBadge';
 import type { Document, OcrResult, DocumentType, ExtractedField, FieldMappingConfig, ValidationResult } from '../types';
 import {
   ChevronLeft, Cpu, XCircle, FileText,
-  AlertTriangle, CheckCircle, Loader2, Clock, History, Edit2, Check, X, Pencil, CheckSquare, RefreshCw, StopCircle, BarChart2,
+  AlertTriangle, CheckCircle, Loader2, Clock, History, Edit2, Check, X, Pencil, CheckSquare, RefreshCw, StopCircle, BarChart2, Replace, Upload, ArrowUp,
 } from 'lucide-react';
 
 // ─── EditableCell ─────────────────────────────────────────────────────────────
@@ -30,7 +30,7 @@ function EditableCell({
   align = 'left',
 }: EditableCellProps) {
   const displayVal = field
-    ? (field.isManuallyCorreected && field.correctedValue
+    ? (field.isManuallyCorreected && field.correctedValue != null
         ? field.correctedValue
         : (field.normalizedValue ?? field.rawValue ?? ''))
     : '';
@@ -39,7 +39,9 @@ function EditableCell({
   const [draft, setDraft] = useState(displayVal);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => { setDraft(displayVal); }, [displayVal]);
+  // Only sync draft from displayVal when not editing — if we update while the user
+  // is typing, the optimistic cache update (or background refetch) would reset their draft.
+  useEffect(() => { if (!editing) setDraft(displayVal); }, [displayVal, editing]);
 
   useEffect(() => {
     if (editing && inputRef.current) {
@@ -72,16 +74,23 @@ function EditableCell({
   }
 
   if (editing) {
+    // Use an invisible span to hold the column width while the input overlays it.
+    // Without this, switching span↔input causes the column to reflow on every edit.
     return (
-      <input
-        ref={inputRef}
-        type="text"
-        value={draft}
-        onChange={e => setDraft(e.target.value)}
-        onBlur={save}
-        onKeyDown={handleKeyDown}
-        className={`border border-ring rounded px-1.5 py-0.5 text-sm w-full bg-background focus:outline-none focus:ring-1 focus:ring-ring ${alignClass}`}
-      />
+      <div className="relative w-full">
+        <span className={`invisible block px-1.5 py-0.5 text-sm whitespace-pre ${alignClass}`} aria-hidden="true">
+          {draft || placeholder}
+        </span>
+        <input
+          ref={inputRef}
+          type="text"
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={save}
+          onKeyDown={handleKeyDown}
+          className={`absolute inset-0 border border-ring rounded px-1.5 py-0.5 text-sm w-full bg-background focus:outline-none focus:ring-1 focus:ring-ring ${alignClass}`}
+        />
+      </div>
     );
   }
 
@@ -115,6 +124,19 @@ export default function DocumentDetailPage() {
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   const [paddleRawRunning, setPaddleRawRunning] = useState(false);
   const [paddleRawText, setPaddleRawText] = useState<string | null>(null);
+  const [showFindReplace, setShowFindReplace] = useState(false);
+  const [frFind, setFrFind] = useState('');
+  const [frReplace, setFrReplace] = useState('');
+  const [frScope, setFrScope] = useState<string>('__all__');  // '__all__' or a fieldName
+  const TABLE_PAGE_SIZE = 30;
+  const [tablePage, setTablePage] = useState(1);
+  const [showBackToTop, setShowBackToTop] = useState(false);
+
+  useEffect(() => {
+    const onScroll = () => setShowBackToTop(window.scrollY > 400);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
 
   // Tracks doc status across renders to detect the Processing → PendingReview transition.
   const prevStatusRef = useRef<string | undefined>(undefined);
@@ -123,16 +145,19 @@ export default function DocumentDetailPage() {
     queryKey: ['document', id],
     queryFn: () => documentApi.getById(id!).then(r => r.data),
     enabled: !!id,
-    // Poll while Uploaded (OCR may have been started from UploadPage) or Processing.
-    refetchInterval: q => ['Uploaded', 'Processing'].includes(q.state.data?.status ?? '') ? 3000 : false,
+    // Poll while Uploaded/PendingProcess/Processing (OCR queued or running) or while a background validation job is running.
+    refetchInterval: q => {
+      const d = q.state.data;
+      return (d && (['Uploaded', 'PendingProcess', 'Processing'].includes(d.status) || d.isValidating)) ? 3000 : false;
+    },
   });
 
   const { data: ocrResult } = useQuery<OcrResult>({
     queryKey: ['ocr-result', id],
     queryFn: () => ocrApi.getResult(id!).then(r => r.data),
-    // Disable while Processing so the cleared cache (set in onMutate) never triggers
+    // Disable while PendingProcess/Processing so the cleared cache (set in onMutate) never triggers
     // a premature 404 fetch — the query auto-enables when status becomes PendingReview.
-    enabled: !!id && doc?.status !== 'Uploaded' && doc?.status !== 'Processing',
+    enabled: !!id && !['Uploaded', 'PendingProcess', 'Processing'].includes(doc?.status ?? ''),
     retry: false,
   });
 
@@ -150,7 +175,21 @@ export default function DocumentDetailPage() {
   const { data: validations } = useQuery<ValidationResult[]>({
     queryKey: ['validation', id],
     queryFn: () => validationApi.getResults(id!).then(r => r.data),
-    enabled: !!id && doc?.status !== 'Uploaded',
+    enabled: !!id && !['Uploaded', 'PendingProcess'].includes(doc?.status ?? ''),
+    retry: false,
+    // Poll for fresh results while a background validation job is running on the server.
+    refetchInterval: q => (q.state.data !== undefined && doc?.isValidating) ? 2000 : false,
+  });
+
+  // Per-document ERP aging — fetched directly from Acumatica GI (same source as CashFlow page).
+  // Only queried for vendor statement docs after OCR is done.
+  const docType_forQuery = docTypes?.find(dt => dt.id === doc?.documentTypeId);
+  const isVendorStatement_forQuery = docType_forQuery?.category === 'VendorStatement';
+  const { data: erpAging } = useQuery({
+    queryKey: ['erp-aging', id],
+    queryFn: () => cashFlowApi.getDocumentVendorAging(id!).then(r => r.data),
+    enabled: !!id && isVendorStatement_forQuery && !['Uploaded', 'PendingProcess', 'Processing'].includes(doc?.status ?? ''),
+    staleTime: 5 * 60_000,
     retry: false,
   });
 
@@ -167,9 +206,9 @@ export default function DocumentDetailPage() {
       // removeQueries ensures the next fetch is always a clean server round-trip.
       queryClient.removeQueries({ queryKey: ['ocr-result', id] });
       queryClient.setQueryData(['validation', id], []);
-      // Optimistically set status to Processing so polling kicks in without a server round-trip.
+      // Optimistically set status to PendingProcess so polling kicks in without a server round-trip.
       queryClient.setQueryData<Document>(['document', id], old =>
-        old ? { ...old, status: 'Processing' } : old
+        old ? { ...old, status: 'PendingProcess' } : old
       );
     },
     onSuccess: () => {
@@ -181,9 +220,38 @@ export default function DocumentDetailPage() {
     },
   });
 
+  const reExtract = useMutation({
+    mutationFn: () => ocrApi.reExtractFields(id!),
+    onSuccess: (res) => {
+      queryClient.setQueryData(['ocr-result', id], res.data);
+      queryClient.setQueryData(['validation', id], []);
+      queryClient.invalidateQueries({ queryKey: ['document', id] });
+      queryClient.invalidateQueries({ queryKey: ['documents'] });
+    },
+  });
+
   const deleteDoc = useMutation({
     mutationFn: () => documentApi.delete(id!),
     onSuccess: () => navigate('/documents'),
+  });
+
+  const reuploadRef = useRef<HTMLInputElement>(null);
+
+  const reuploadMutation = useMutation({
+    mutationFn: (file: File) => {
+      const fd = new FormData();
+      fd.append('file', file);
+      return documentApi.addVersion(id!, fd);
+    },
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ['ocr-result', id] });
+      queryClient.setQueryData(['validation', id], []);
+      queryClient.setQueryData<Document>(['document', id], old =>
+        old ? { ...old, status: 'PendingProcess' } : old
+      );
+      queryClient.invalidateQueries({ queryKey: ['documents'] });
+      triggerOcr.mutate();
+    },
   });
 
   const markChecked = useMutation({
@@ -200,10 +268,12 @@ export default function DocumentDetailPage() {
   const [isRunning, setIsRunning] = useState(false);
   // Set to true when the user clicks Stop — checked at each loop iteration.
   const stopRequestedRef = useRef(false);
+  // AbortController for cancelling in-flight validation HTTP requests on unmount or stop.
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const validateField = useMutation({
     mutationFn: (fieldId: string) =>
-      validationApi.validateField(id!, fieldId).then(r => r.data as ValidationResult[]),
+      validationApi.validateField(id!, fieldId, abortControllerRef.current?.signal ?? undefined).then(r => r.data as ValidationResult[]),
     onMutate: (fieldId) => {
       setPendingIds(prev => new Set([...prev, fieldId]));
     },
@@ -221,8 +291,28 @@ export default function DocumentDetailPage() {
   const correctField = useMutation({
     mutationFn: ({ fieldId, value }: { fieldId: string; value: string }) =>
       ocrApi.correctField(id!, fieldId, value),
+    onMutate: ({ fieldId, value }) => {
+      // Optimistically update the OCR result cache so the UI reflects the new value immediately
+      // without waiting for the server round-trip. This prevents the visual "revert" flicker.
+      queryClient.setQueryData<OcrResult>(['ocr-result', id], old => {
+        if (!old) return old;
+        return {
+          ...old,
+          fields: old.fields.map(f =>
+            f.id === fieldId
+              ? { ...f, correctedValue: value, isManuallyCorreected: true }
+              : f
+          ),
+        };
+      });
+    },
     onSuccess: (_, { fieldId }) => {
+      // Background refetch to confirm server state (does not cause a visible flicker because
+      // the optimistic value above already matches what the server will return).
       queryClient.invalidateQueries({ queryKey: ['ocr-result', id] });
+      // Refresh document + list — vendorName corrections sync to the document entity on the server.
+      queryClient.invalidateQueries({ queryKey: ['document', id] });
+      queryClient.invalidateQueries({ queryKey: ['documents'] });
       // Only re-validate if the field has ERP mapping — non-ERP fields have no validator to run.
       if (validatableFieldIds.includes(fieldId)) validateField.mutate(fieldId);
     },
@@ -245,6 +335,24 @@ export default function DocumentDetailPage() {
     return map;
   }, [fieldConfigs]);
 
+  const applyFindReplace = useCallback(() => {
+    if (!frFind || !ocrResult) return;
+    for (const field of ocrResult.fields) {
+      const cfg = fieldConfigMap[field.fieldName.toLowerCase()];
+      if (cfg?.isCheckbox) continue;
+      if (frScope !== '__all__' && field.fieldName !== frScope) continue;
+      const current = field.isManuallyCorreected && field.correctedValue != null
+        ? field.correctedValue
+        : (field.normalizedValue ?? field.rawValue ?? '');
+      if (current.includes(frFind)) {
+        save(field.id, current.split(frFind).join(frReplace));
+      }
+    }
+    setShowFindReplace(false);
+    setFrFind('');
+    setFrReplace('');
+  }, [frFind, frReplace, frScope, ocrResult, fieldConfigMap, save]);
+
   // Only fields that have an ERP mapping key get a spinner — fields with no validation
   // configured don't need to show a checking state.
   const validatableFieldIds = useMemo(() =>
@@ -256,112 +364,119 @@ export default function DocumentDetailPage() {
       .map(f => f.id),
   [ocrResult?.fields, fieldConfigMap]);
 
-  // Groups header fields sequentially (so dependency failures can short-circuit dependents),
-  // then table rows sequentially row-by-row with the same dependency skip logic.
-  const runSequential = useCallback(async (fields: ExtractedField[]) => {
-    const validatable = fields.filter(f => {
-      const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
-      return cfg?.erpMappingKey && !cfg.isManualEntry && !cfg.isCheckbox;
-    });
+  // When the background Hangfire job is running, treat validatable fields that don't
+  // yet have any result as pending so they show a spinner until results arrive.
+  const backgroundPendingIds = useMemo(() => {
+    if (!doc?.isValidating) return new Set<string>();
+    const validatedFieldIds = new Set(
+      (validations ?? []).map(v => v.extractedFieldId).filter(Boolean)
+    );
+    return new Set(validatableFieldIds.filter(fid => !validatedFieldIds.has(fid)));
+  }, [doc?.isValidating, validations, validatableFieldIds]);
 
-    const checkIsTableField = (name: string) => {
-      const cfg = fieldConfigMap[name.toLowerCase()];
-      if (cfg) return cfg.allowMultiple;
-      return (fields.filter(f => f.fieldName === name).length) > 1;
-    };
+  const validateRow = useCallback((fieldIds: string[]) => {
+    const ids = fieldIds.filter(fid => validatableFieldIds.includes(fid));
+    if (ids.length === 0) return;
+    ids.forEach(fid => setPendingIds(prev => new Set([...prev, fid])));
+    validationApi.validateRow(id!, ids, abortControllerRef.current?.signal ?? undefined)
+      .then(res => {
+        const newResults = res.data as ValidationResult[];
+        queryClient.setQueryData<ValidationResult[]>(['validation', id], old => {
+          const base = old ?? [];
+          const idSet = new Set(ids);
+          return [...base.filter(v => !v.extractedFieldId || !idSet.has(v.extractedFieldId)), ...newResults];
+        });
+      })
+      .catch(() => {})
+      .finally(() => {
+        ids.forEach(fid => setPendingIds(prev => { const next = new Set(prev); next.delete(fid); return next; }));
+      });
+  }, [id, validatableFieldIds, queryClient]);
 
-    const headerFieldsToRun = validatable
-      .filter(f => !checkIsTableField(f.fieldName))
-      .sort((a, b) =>
-        (fieldConfigMap[a.fieldName.toLowerCase()]?.displayOrder ?? 999) -
-        (fieldConfigMap[b.fieldName.toLowerCase()]?.displayOrder ?? 999));
-    const tableFields = validatable.filter(f => checkIsTableField(f.fieldName));
 
-    // Track which field NAMES failed — used to skip dependents.
-    const failedFieldNames = new Set<string>();
-
-    // 1. Run header fields one-by-one so we can skip dependents whose parent failed.
-    for (const f of headerFieldsToRun) {
-      if (stopRequestedRef.current) break;
-      const cfg = fieldConfigMap[f.fieldName.toLowerCase()];
-      // Skip if this field's dependency already failed.
-      if (cfg?.dependentFieldKey && failedFieldNames.has(cfg.dependentFieldKey.toLowerCase())) continue;
-      try {
-        const results = await validateField.mutateAsync(f.id);
-        if (results.some((r: ValidationResult) => r.status === 'Failed'))
-          failedFieldNames.add(f.fieldName.toLowerCase());
-      } catch { /* onError handles 424 */ }
-    }
-
-    // 2. Group table fields by column name and run row-by-row.
-    const colNames = [...new Set(tableFields.map(f => f.fieldName))];
-    const groupedCols: Record<string, ExtractedField[]> = {};
-    for (const name of colNames) groupedCols[name] = fields.filter(f => f.fieldName === name);
-    const maxRows = Math.max(...Object.values(groupedCols).map(g => g.length), 0);
-
-    for (let i = 0; i < maxRows; i++) {
-      if (stopRequestedRef.current) break;
-      // Track IDs that failed within this row to skip intra-row dependents.
-      const failedRowFieldNames = new Set<string>();
-
-      // Sort columns by displayOrder so dependency order is respected within each row.
-      const sortedCols = [...colNames].sort((a, b) =>
-        (fieldConfigMap[a.toLowerCase()]?.displayOrder ?? 999) -
-        (fieldConfigMap[b.toLowerCase()]?.displayOrder ?? 999));
-
-      for (const name of sortedCols) {
-        if (stopRequestedRef.current) break;
-        const f = groupedCols[name]?.[i];
-        if (!f || !fieldConfigMap[name.toLowerCase()]?.erpMappingKey) continue;
-        const cfg = fieldConfigMap[name.toLowerCase()];
-        const depKey = cfg?.dependentFieldKey?.toLowerCase();
-        // Skip if global dependency (e.g. vendorName) or row-level dependency failed.
-        if (depKey && (failedFieldNames.has(depKey) || failedRowFieldNames.has(depKey))) continue;
-        try {
-          const results = await validateField.mutateAsync(f.id);
-          if (results.some((r: ValidationResult) => r.status === 'Failed'))
-            failedRowFieldNames.add(name.toLowerCase());
-        } catch { /* onError handles 424 */ }
-      }
-    }
-  }, [fieldConfigMap, validateField, stopRequestedRef]);
+  const setValidating = useCallback((flag: boolean) => {
+    documentApi.setValidating(id!, flag).catch(() => {});
+  }, [id]);
 
   const runAllValidations = useCallback(async () => {
-    stopRequestedRef.current = false;
+    if (!id) return;
     setIsRunning(true);
-    await runSequential(ocrResult?.fields ?? []);
-    // Only clear isRunning if the user hasn't already stopped it — prevents a
-    // re-render flash where the Stop button briefly reappears as Run Validation.
-    if (!stopRequestedRef.current) setIsRunning(false);
-  }, [runSequential, ocrResult?.fields]);
+    setValidating(true);
+    try {
+      await validationApi.enqueue(id);
+      queryClient.removeQueries({ queryKey: ['validation', id] });
+      queryClient.invalidateQueries({ queryKey: ['document', id] });
+    } catch {
+      setIsRunning(false);
+      setValidating(false);
+    }
+  }, [id, queryClient, setValidating]);
 
   const stopValidation = useCallback(() => {
     stopRequestedRef.current = true;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
     setIsRunning(false);
     setPendingIds(new Set());
-  }, []);
+    setValidating(false);
+    if (id) validationApi.stop(id).catch(() => {});
+  }, [id, setValidating]);
 
-  const isValidating = isRunning || allFieldIds.some(id => pendingIds.has(id));
+  // Three independent validation paths can be active simultaneously:
+  //   doc.isValidating — background Hangfire job (survives navigation)
+  //   isRunning       — local sequential loop (table-only or auto-run after OCR)
+  //   pendingIds      — individual field re-validates triggered by field edits
+  const isValidating = isRunning || doc?.isValidating === true || allFieldIds.some(id => pendingIds.has(id));
+
+  // When the server job finishes, the doc poll will flip doc.isValidating to false.
+  // isRunning is only in the condition, not the deps — we only want to react to
+  // the server flag changing, not to isRunning toggling independently.
+  useEffect(() => {
+    if (!doc?.isValidating && isRunning) {
+      setIsRunning(false);
+      setValidating(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.isValidating]);
+
+  // On unmount / document change: abort in-flight per-field HTTP calls so the browser
+  // connection pool is freed. Server background jobs continue independently and clear
+  // doc.isValidating themselves when they finish.
+  useEffect(() => {
+    return () => {
+      stopRequestedRef.current = true;
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      setIsRunning(false);
+      setPendingIds(new Set());
+    };
+  }, [id]);
 
   // Auto-run validation when OCR completes (Processing → PendingReview).
-  // setIsRunning(true) fires BEFORE the async fetch so the UI enters validating mode immediately.
-  // fetchQuery explicitly fetches fresh OCR fields — avoids relying on stale cache or
-  // reference-equality tricks that can cause Phase 2 effects to silently skip.
+  // Uses the same Hangfire enqueue path as the "Run Validation" button so both
+  // paths share the same server-side ordering, vendor-context resolution, and
+  // queue visibility.  isRunning is cleared by the doc.isValidating poll once
+  // the server job finishes (see the useEffect below).
   useEffect(() => {
-    if (['Uploaded', 'Processing'].includes(prevStatusRef.current ?? '') && doc?.status === 'PendingReview') {
+    if (['Uploaded', 'PendingProcess', 'Processing'].includes(prevStatusRef.current ?? '') && doc?.status === 'PendingReview') {
       queryClient.setQueryData(['validation', id], []);
       stopRequestedRef.current = false;
       setIsRunning(true);
+      setValidating(true);
       ocrApi.getResult(id!).then(r => r.data)
         .then((freshResult: OcrResult) => {
-          // Explicitly push the fresh OCR result into the cache so the useQuery observer
-          // (enabled now that status is PendingReview) definitely renders the new fields.
+          // Push fresh OCR result into cache so the fields render immediately.
           queryClient.setQueryData(['ocr-result', id], freshResult);
-          const fields = freshResult?.fields ?? [];
-          if (!stopRequestedRef.current) return runSequential(fields);
+          queryClient.removeQueries({ queryKey: ['validation', id] });
+          return validationApi.enqueue(id!);
         })
-        .catch(() => { /* OCR result not ready yet — polling will retry */ })
-        .finally(() => { if (!stopRequestedRef.current) setIsRunning(false); });
+        .then(() => {
+          queryClient.invalidateQueries({ queryKey: ['document', id] });
+        })
+        .catch(() => {
+          setIsRunning(false);
+          setValidating(false);
+        });
     }
     prevStatusRef.current = doc?.status;
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -370,8 +485,8 @@ export default function DocumentDetailPage() {
   const refreshSummary = useCallback(async () => {
     setSummaryRefreshing(true);
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['ocr-result', id] }),
-      queryClient.invalidateQueries({ queryKey: ['validation', id] }),
+      queryClient.refetchQueries({ queryKey: ['ocr-result', id] }),
+      queryClient.refetchQueries({ queryKey: ['validation', id] }),
     ]);
     setSummaryRefreshing(false);
   }, [queryClient, id]);
@@ -382,6 +497,20 @@ export default function DocumentDetailPage() {
     // Unconfigured extra: treat as table if it appears more than once
     return (ocrResult?.fields.filter(f => f.fieldName === fieldName).length ?? 0) > 1;
   }, [fieldConfigMap, ocrResult]);
+
+  const runTableValidation = useCallback(async () => {
+    if (!id) return;
+    setIsRunning(true);
+    setValidating(true);
+    try {
+      await validationApi.enqueueTable(id);
+      queryClient.removeQueries({ queryKey: ['validation', id] });
+      queryClient.invalidateQueries({ queryKey: ['document', id] });
+    } catch {
+      setIsRunning(false);
+      setValidating(false);
+    }
+  }, [id, queryClient, setValidating]);
 
   // Header fields: single-value, first occurrence of each name, sorted by displayOrder
   const headerFields = useMemo(() => {
@@ -418,6 +547,13 @@ export default function DocumentDetailPage() {
     Math.max(...Object.values(tableFieldGroups).map(g => g.length), 0),
   [tableFieldGroups]);
 
+  const totalTablePages = Math.ceil(tableRowCount / TABLE_PAGE_SIZE);
+  const tablePageStart  = (tablePage - 1) * TABLE_PAGE_SIZE;
+  const tablePageEnd    = Math.min(tablePage * TABLE_PAGE_SIZE, tableRowCount);
+
+  // Reset to page 1 when the document changes.
+  useEffect(() => { setTablePage(1); }, [id]);
+
   // Which table-row field IDs belong to "settled" rows (any isCheckbox column is "true").
   const settledFieldIds = useMemo(() => {
     const ids = new Set<string>();
@@ -440,11 +576,54 @@ export default function DocumentDetailPage() {
     return ids;
   }, [tableColumnNames, tableFieldGroups, tableRowCount, fieldConfigMap]);
 
+  // Pre-compute statement debit/credit totals as a proper useMemo so the Summary
+  // section recalculates automatically whenever a table field is edited.
+  // (ocrResult → tableFieldGroups → stmtTotals → summary render)
+  const stmtTotals = useMemo(() => {
+    const parseAmt = (v: string): number => {
+      const isCR = /\s*cr\s*$/i.test(v.trim());
+      const n = parseFloat(v.replace(/[^\d.\-]/g, ''));
+      return isNaN(n) ? NaN : (isCR ? -Math.abs(n) : n);
+    };
+    const debitCols  = tableColumnNames.filter(n => /amount|debit/i.test(n) && !/credit|payment/i.test(n));
+    const creditCols = tableColumnNames.filter(n => /credit|payment/i.test(n));
+    const refCol = tableColumnNames.find(n =>
+      /ref|invoice.*no|inv.*no/i.test(n) && !/amount|balance|debit|credit|date|due/i.test(n)
+    );
+    const isBF = (i: number) => {
+      if (!refCol) return false;
+      const f = tableFieldGroups[refCol]?.[i];
+      if (!f) return false;
+      const v = f.isManuallyCorreected && f.correctedValue != null ? f.correctedValue : (f.normalizedValue ?? f.rawValue ?? '');
+      return /^b[\/\-]?f$|^balance\s*b[\/\-]?f$|^brought\s*forward$|^opening/i.test(v.trim());
+    };
+    let totalDebit = 0, totalCredit = 0;
+    for (const col of debitCols) {
+      (tableFieldGroups[col] ?? []).forEach((f, i) => {
+        if (isBF(i)) return;
+        const v = f.isManuallyCorreected && f.correctedValue != null ? f.correctedValue : (f.normalizedValue ?? f.rawValue ?? '');
+        const n = parseAmt(v);
+        if (isNaN(n)) return;
+        if (n > 0) totalDebit += n;
+        else totalCredit += Math.abs(n);
+      });
+    }
+    for (const col of creditCols) {
+      (tableFieldGroups[col] ?? []).forEach((f, i) => {
+        if (isBF(i)) return;
+        const v = f.isManuallyCorreected && f.correctedValue != null ? f.correctedValue : (f.normalizedValue ?? f.rawValue ?? '');
+        const n = parseAmt(v);
+        if (!isNaN(n) && n !== 0) totalCredit += Math.abs(n);
+      });
+    }
+    return { totalDebit, totalCredit };
+  }, [tableFieldGroups, tableColumnNames]);
+
   if (isLoading) return <div className="text-center py-12 text-muted-foreground">Loading...</div>;
   if (!doc) return <div className="text-center py-12 text-destructive">Document not found.</div>;
 
-  // Include Processing so users can force-restart a stuck OCR (e.g. previous run timed out).
-  const canOcr  = ['Uploaded', 'PendingReview', 'ReviewInProgress', 'Processing'].includes(doc.status);
+  // Include PendingProcess/Processing so users can force-restart a stuck OCR (e.g. previous run timed out).
+  const canOcr  = ['Uploaded', 'PendingProcess', 'PendingReview', 'ReviewInProgress', 'Processing'].includes(doc.status);
   const isRerun = doc.status !== 'Uploaded';
 
   const allValidations = validations ?? [];
@@ -459,7 +638,7 @@ export default function DocumentDetailPage() {
   const stmtFieldVal = (name: string): string | undefined => {
     const f = ocrResult?.fields.find(f => f.fieldName.toLowerCase() === name.toLowerCase());
     if (!f) return undefined;
-    return (f.isManuallyCorreected && f.correctedValue) ? f.correctedValue : (f.normalizedValue ?? f.rawValue ?? undefined);
+    return f.isManuallyCorreected && f.correctedValue != null ? f.correctedValue : (f.normalizedValue ?? f.rawValue ?? undefined);
   };
   const stmtParseAmt = (v: string | undefined): number => {
     if (!v) return NaN;
@@ -495,13 +674,34 @@ export default function DocumentDetailPage() {
   return (
     <div className="space-y-5 max-w-5xl mx-auto">
 
+      {/* ── Re-upload required banner ───────────────────────────────────── */}
+      {doc.reuploadRequired && (
+        <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+          <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-amber-800">Re-upload required</p>
+            <p className="text-sm text-amber-700 mt-0.5">
+              This document could not be processed reliably. Please re-upload a clearer copy using the <strong>Re-upload</strong> button below.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* ── Header ─────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-2 sm:gap-3">
-        <button onClick={() => navigate('/documents')} className="text-muted-foreground hover:text-foreground flex-shrink-0">
+        <button onClick={() => navigate(-1)} className="text-muted-foreground hover:text-foreground flex-shrink-0">
           <ChevronLeft className="h-5 w-5" />
         </button>
         <div className="flex-1 min-w-0">
-          <h1 className="text-base sm:text-xl font-bold text-foreground truncate">{doc.originalFilename}</h1>
+          <div className="flex items-center gap-2 min-w-0">
+            <h1 className="text-base sm:text-xl font-bold text-foreground truncate">{doc.originalFilename}</h1>
+            {doc.isValidating && (
+              <span className="flex items-center gap-1 text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full whitespace-nowrap flex-shrink-0">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Validating with Acumatica
+              </span>
+            )}
+          </div>
           <p className="text-sm text-muted-foreground">{doc.documentTypeName ?? 'No type assigned'}</p>
         </div>
         <StatusBadge status={doc.status} />
@@ -520,7 +720,7 @@ export default function DocumentDetailPage() {
           </button>
         )}
 
-        {doc.status !== 'Uploaded' && doc.status !== 'Processing' && (
+        {!['Uploaded', 'PendingProcess', 'Processing'].includes(doc.status) && (
           isValidating ? (
             <button
               onClick={stopValidation}
@@ -530,17 +730,19 @@ export default function DocumentDetailPage() {
               Stop Validation
             </button>
           ) : (
-            <button
-              onClick={runAllValidations}
-              className="btn-secondary flex items-center gap-2 text-sm"
-            >
-              <RefreshCw className="h-4 w-4" />
-              Run Validation
-            </button>
+            <>
+              <button
+                onClick={runAllValidations}
+                className="btn-secondary flex items-center gap-2 text-sm"
+              >
+                <RefreshCw className="h-4 w-4" />
+                Run Validation
+              </button>
+            </>
           )
         )}
 
-        {doc.status !== 'Uploaded' && doc.status !== 'Processing' && (
+        {!['Uploaded', 'PendingProcess', 'Processing'].includes(doc.status) && (
           <Link to={`/documents/${id}/verify`} className="btn-secondary flex items-center gap-2 text-sm">
             <FileText className="h-4 w-4" /> Review Fields
           </Link>
@@ -559,6 +761,34 @@ export default function DocumentDetailPage() {
           </button>
         )}
 
+        {!['PendingProcess', 'Processing'].includes(doc.status) && (
+          <>
+            <input
+              ref={reuploadRef}
+              type="file"
+              accept=".pdf,.png,.jpg,.jpeg,.tiff,.tif"
+              className="hidden"
+              onChange={e => {
+                const file = e.target.files?.[0];
+                if (file) reuploadMutation.mutate(file);
+                e.target.value = '';
+              }}
+            />
+            <button
+              onClick={() => reuploadRef.current?.click()}
+              disabled={reuploadMutation.isPending}
+              className={`flex items-center gap-2 text-sm ${doc.reuploadRequired ? 'btn-primary ring-2 ring-amber-400' : 'btn-secondary'}`}
+              title="Replace the document file and re-run OCR"
+            >
+              {reuploadMutation.isPending
+                ? <Loader2 className="h-4 w-4 animate-spin" />
+                : <Upload className="h-4 w-4" />}
+              Re-upload
+              {doc.reuploadRequired && <AlertTriangle className="h-3.5 w-3.5 text-amber-300" />}
+            </button>
+          </>
+        )}
+
         {isAdmin && (
           <button
             onClick={() => setShowDeleteModal(true)}
@@ -574,6 +804,7 @@ export default function DocumentDetailPage() {
           OCR processing failed. Check that the document is a valid PDF, PNG, or TIFF and try again.
         </div>
       )}
+
 
       {/* ── Document Info + OCR Summary ────────────────────────────────── */}
       <div className="grid md:grid-cols-2 gap-5">
@@ -634,9 +865,11 @@ export default function DocumentDetailPage() {
             <p className="text-sm text-muted-foreground">
               {doc.status === 'Uploaded'
                 ? 'OCR has not been run yet.'
-                : doc.status === 'Processing'
-                  ? <span className="flex items-center gap-2"><Clock className="h-4 w-4 animate-spin" /> Processing...</span>
-                  : 'No OCR result available.'}
+                : doc.status === 'PendingProcess'
+                  ? <span className="flex items-center gap-2"><Clock className="h-4 w-4" /> Queued for processing...</span>
+                  : doc.status === 'Processing'
+                    ? <span className="flex items-center gap-2"><Clock className="h-4 w-4 animate-spin" /> Processing...</span>
+                    : 'No OCR result available.'}
             </p>
           ) : (
             <>
@@ -687,7 +920,7 @@ export default function DocumentDetailPage() {
           )}
           {ocrResult && !doc.documentTypeId && (
             <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded p-2">
-              No document type assigned — assign a type above and re-run OCR to extract fields.
+              No document type assigned — assign a type above, then click <strong>Re-extract Fields</strong> to extract fields without re-scanning.
             </p>
           )}
         </div>
@@ -706,9 +939,8 @@ export default function DocumentDetailPage() {
           return isNaN(n) ? NaN : (isCR ? -Math.abs(n) : n);
         };
 
-        // Mutually exclusive: credit/payment columns must NOT be counted as debit.
-        const debitColNames  = tableColumnNames.filter(n => /amount|debit/i.test(n) && !/credit|payment/i.test(n));
-        const creditColNames = tableColumnNames.filter(n => /credit|payment/i.test(n));
+        // Debit columns used for ERP validation stats (credit columns are handled by stmtTotals).
+        const debitColNames = tableColumnNames.filter(n => /amount|debit/i.test(n) && !/credit|payment/i.test(n));
 
         // Detect B/F (brought-forward / opening balance) rows by checking the ref column.
         // These rows carry the opening balance carried over — they must NOT be counted as
@@ -721,67 +953,40 @@ export default function DocumentDetailPage() {
           if (!refColName) return false;
           const f = tableFieldGroups[refColName]?.[i];
           if (!f) return false;
-          const v = (f.isManuallyCorreected && f.correctedValue)
+          const v = f.isManuallyCorreected && f.correctedValue != null
             ? f.correctedValue : (f.normalizedValue ?? f.rawValue ?? '');
           return /^b[\/\-]?f$|^balance\s*b[\/\-]?f$|^brought\s*forward$|^opening/i.test(v.trim());
         };
 
-        // Sum debit columns: only positive amounts, excluding B/F rows.
-        // Negative amounts (or "CR"-suffixed) in a debit column are credits — add to credit.
-        let totalDebit  = 0;
-        let totalCredit = 0;
-        for (const colName of debitColNames) {
-          (tableFieldGroups[colName] ?? []).forEach((f, i) => {
-            if (isBFRow(i)) return;
-            const v = (f.isManuallyCorreected && f.correctedValue)
-              ? f.correctedValue : (f.normalizedValue ?? f.rawValue ?? '');
-            const n = parseAmt(v);
-            if (isNaN(n)) return;
-            if (n > 0) totalDebit  += n;
-            else       totalCredit += Math.abs(n);  // CR/negative in debit column = credit
-          });
-        }
-        for (const colName of creditColNames) {
-          // Dedicated credit column — sum absolute values (may already be positive)
-          (tableFieldGroups[colName] ?? []).forEach((f, i) => {
-            if (isBFRow(i)) return;
-            const v = (f.isManuallyCorreected && f.correctedValue)
-              ? f.correctedValue : (f.normalizedValue ?? f.rawValue ?? '');
-            const n = parseAmt(v);
-            if (!isNaN(n) && n !== 0) totalCredit += Math.abs(n);
-          });
-        }
+        // Use pre-computed totals from stmtTotals useMemo — this ensures the values
+        // update immediately when any table field is edited without waiting for a refetch.
+        const { totalDebit, totalCredit } = stmtTotals;
 
-        // Total Invoice Amount (System): per debit-column field —
-        //   Passed        → statement amount is correct (matches ERP)
-        //   Failed/Warning → use ERP amount (statement is wrong; take system as authoritative)
-        //   No validation → use statement amount as provisional
-        let totalInvoiceSystem = 0;
+        // Total Invoice Amount breakdown per debit-column field:
+        //   Passed        → counted as "found in Acumatica" (statement amount)
+        //   Failed/Warning → counted as "not in Acumatica" (statement amount)
+        //   No validation  → not counted in either bucket yet
+        let totalFoundInErp    = 0; // confirmed lines (statement amounts)
+        let totalNotInAcumatica = 0; // unmatched lines (statement amounts)
         let matchedLineCount   = 0;
         let unmatchedLineCount = 0;
 
         for (const colName of debitColNames) {
           const col = tableFieldGroups[colName] ?? [];
           col.forEach((f, i) => {
-            if (isBFRow(i)) return; // exclude B/F from invoice total too
+            if (isBFRow(i)) return;
             const fVals = allValidations.filter(v => v.extractedFieldId === f.id);
-            const rawVal = (f.isManuallyCorreected && f.correctedValue)
+            const rawVal = f.isManuallyCorreected && f.correctedValue != null
               ? f.correctedValue : (f.normalizedValue ?? f.rawValue ?? '');
             const stmtNum = parseAmt(rawVal);
             const passed = fVals.find(v => v.status === 'Passed');
             const failed = fVals.find(v => v.status === 'Failed' || v.status === 'Warning');
             if (passed) {
-              totalInvoiceSystem += isNaN(stmtNum) ? 0 : stmtNum;
+              totalFoundInErp += isNaN(stmtNum) ? 0 : stmtNum;
               matchedLineCount++;
             } else if (failed) {
-              const cfg    = fieldConfigMap[colName.toLowerCase()];
-              const erpKey = cfg?.erpResponseField ?? 'Amount';
-              const erpAmt = getErpValue(failed.erpReference, erpKey);
-              const erpNum = erpAmt ? parseFloat(erpAmt) : NaN;
-              totalInvoiceSystem += !isNaN(erpNum) ? erpNum : (!isNaN(stmtNum) ? stmtNum : 0);
+              totalNotInAcumatica += isNaN(stmtNum) ? 0 : stmtNum;
               unmatchedLineCount++;
-            } else {
-              totalInvoiceSystem += isNaN(stmtNum) ? 0 : stmtNum;
             }
           });
         }
@@ -790,50 +995,67 @@ export default function DocumentDetailPage() {
         // so it matches the number of rows the user sees in the Table Data section.
         const displayTotalLines = tableRowCount;
 
-        // ERP outstanding balance from VendorStatement validation
+        // ERP outstanding balance — prefer live GI data (same as CashFlow page),
+        // fall back to VendorStatement validation result if GI data unavailable.
         const outstandingValidation = allValidations.find(v =>
           v.fieldName?.toLowerCase() === 'outstandingbalance' &&
           v.validationType === 'VendorStatement' &&
           v.status !== 'Skipped'
         );
-        const erpComputed  = outstandingValidation
+        const validationComputed = outstandingValidation
           ? getErpValue(outstandingValidation.erpReference, 'computed') : undefined;
         const openBillCount = outstandingValidation
           ? parseInt(getErpValue(outstandingValidation.erpReference, 'billCount') ?? '0', 10) : 0;
 
-        // VendorId from vendorName validation
-        const vendorNameVal = allValidations.find(v =>
-          v.fieldName?.toLowerCase() === 'vendorname' && v.status === 'Passed'
-        );
-        const vendorId = vendorNameVal
-          ? getErpValue(vendorNameVal.erpReference, 'vendorId') : undefined;
+        // Live GI data from erpAging query (no validation run required)
+        const erpAvailable = erpAging?.available === true;
+        const erpComputedNum = erpAvailable
+          ? (erpAging.totalOutstanding as number)
+          : (validationComputed ? parseFloat(validationComputed) : NaN);
+        const vendorId: string | undefined = erpAvailable
+          ? (erpAging.vendorId as string)
+          : (() => {
+              const vendorNameVal = allValidations.find(v =>
+                v.fieldName?.toLowerCase() === 'vendorname' && v.status === 'Passed'
+              );
+              return vendorNameVal ? getErpValue(vendorNameVal.erpReference, 'vendorId') : undefined;
+            })();
 
         const outstandingStmtNum = stmtParseAmt(outstandingStmt);
-        const erpComputedNum     = erpComputed ? parseFloat(erpComputed) : NaN;
         const balanceDiff        = (!isNaN(outstandingStmtNum) && !isNaN(erpComputedNum))
           ? Math.abs(outstandingStmtNum - erpComputedNum) : null;
         const isBalanceMatch = balanceDiff !== null && balanceDiff <= Math.max(erpComputedNum * 0.01, 1);
 
-        // Invoice variance: statement total debit vs system computed total
-        const invoiceVariance = displayTotalLines > 0 ? totalDebit - totalInvoiceSystem : NaN;
-        const isInvoiceMatch  = !isNaN(invoiceVariance) && Math.abs(invoiceVariance) <= 0.01;
+        // Invoice variance: statement total debit vs amount confirmed in Acumatica
+        const invoiceVariance   = displayTotalLines > 0 ? totalDebit - totalFoundInErp : NaN;
+        const hasNotInAcumatica = totalNotInAcumatica > 0;
+        const allLinesVerified  = displayTotalLines > 0 && unmatchedLineCount === 0 && matchedLineCount > 0;
 
         // Internal formula check: Outstanding = Opening + Debit − Credit
         const openingBalanceNum    = stmtParseAmt(openingBalance);
-        const formulaOutstanding   = !isNaN(openingBalanceNum) && (totalDebit > 0 || totalCredit > 0)
-          ? openingBalanceNum + totalDebit - totalCredit : NaN;
-        const formulaDiff = !isNaN(formulaOutstanding) && !isNaN(outstandingStmtNum)
+        const safeOpeningBalance   = isNaN(openingBalanceNum) ? 0 : openingBalanceNum;
+        const formulaOutstanding   = safeOpeningBalance + totalDebit - totalCredit;
+        const formulaDiff = !isNaN(outstandingStmtNum)
           ? Math.abs(formulaOutstanding - outstandingStmtNum) : null;
         const isFormulaMatch = formulaDiff !== null && formulaDiff <= 0.01;
 
         type Highlight = 'pass' | 'fail' | 'warn' | null;
         const balHighlight: Highlight = balanceDiff !== null ? (isBalanceMatch ? 'pass' : 'fail') : null;
-        // For the outstanding cell highlight: formula takes priority when ERP data absent
-        const outstandingHighlight: Highlight = balHighlight
-          ?? (formulaDiff !== null ? (isFormulaMatch ? 'pass' : 'fail') : null);
+        
+        // Outstanding Balance cell (From Statement row): 
+        // The logic of it only required to calculate the Opening Balance + Total Debit - Total Credit. 
+        // Then showing green when the calculation tally with the outstanding balance extracted from the document. 
+        // Showing Red when the calculation not tally.
+        const outstandingHighlight: Highlight = formulaDiff !== null
+          ? (isFormulaMatch ? 'pass' : 'fail')
+          : null;
         const invHighlight: Highlight = displayTotalLines === 0 ? null
-          : isInvoiceMatch ? 'pass'
-          : unmatchedLineCount > 0 ? 'fail'
+          : allLinesVerified ? 'pass'
+          : hasNotInAcumatica ? 'fail'
+          : null;
+        const notInErpHighlight: Highlight = displayTotalLines === 0 ? null
+          : hasNotInAcumatica ? 'fail'
+          : allLinesVerified ? 'pass'
           : null;
 
         const cellCls = (h: Highlight) =>
@@ -921,46 +1143,50 @@ export default function DocumentDetailPage() {
                 />
                 <Cell
                   label="Total Invoice Amt"
-                  value={displayTotalLines > 0 ? stmtFmt(totalInvoiceSystem) : '—'}
-                  sub={unmatchedLineCount > 0 ? `${unmatchedLineCount} line${unmatchedLineCount !== 1 ? 's' : ''} adjusted to ERP` : undefined}
+                  value={matchedLineCount > 0 ? stmtFmt(totalFoundInErp) : (displayTotalLines > 0 ? '—' : '—')}
+                  sub={!isNaN(invoiceVariance) && Math.abs(invoiceVariance) > 0.01
+                    ? `Invoice Variance: ${invoiceVariance > 0 ? '+' : ''}${stmtFmt(invoiceVariance)}`
+                    : allLinesVerified ? '✓ Matches statement total' : undefined}
                   highlight={invHighlight}
                 />
                 <Cell
-                  label="Invoice Variance"
-                  value={!isNaN(invoiceVariance) && displayTotalLines > 0
-                    ? (isInvoiceMatch ? '✓ Matched' : (invoiceVariance > 0 ? '+' : '') + stmtFmt(invoiceVariance))
+                  label="Not in Acumatica"
+                  value={displayTotalLines > 0
+                    ? (hasNotInAcumatica ? stmtFmt(totalNotInAcumatica) : (allLinesVerified ? '✓ All found' : '—'))
                     : '—'}
-                  sub={!isNaN(invoiceVariance) && !isInvoiceMatch && displayTotalLines > 0
-                    ? 'Statement vs Acumatica' : undefined}
-                  highlight={!isNaN(invoiceVariance) && displayTotalLines > 0
-                    ? (isInvoiceMatch ? 'pass' : 'fail') : null}
+                  sub={unmatchedLineCount > 0
+                    ? `${unmatchedLineCount} line${unmatchedLineCount !== 1 ? 's' : ''} not matched`
+                    : undefined}
+                  highlight={notInErpHighlight}
                 />
                 <Cell
                   label="Outstanding Balance"
                   value={!isNaN(erpComputedNum) ? stmtFmt(erpComputedNum) : '—'}
-                  sub={vendorId ? `Vendor: ${vendorId}` : undefined}
+                  sub={erpAvailable
+                    ? `Vendor: ${vendorId ?? '?'} · Live from ERP`
+                    : (vendorId ? `Vendor: ${vendorId}` : undefined)}
                   highlight={balHighlight}
                 />
               </div>
             </div>
 
             {/* Reconciliation status banner */}
-            {(balanceDiff !== null || !isNaN(invoiceVariance) || formulaDiff !== null) && (
+            {(balanceDiff !== null || hasNotInAcumatica || allLinesVerified || formulaDiff !== null) && (
               <div className={`flex items-start gap-2 text-sm rounded-lg p-3 ${
                 (balanceDiff === null || isBalanceMatch) &&
-                (isNaN(invoiceVariance) || isInvoiceMatch) &&
+                !hasNotInAcumatica &&
                 (formulaDiff === null || isFormulaMatch)
                   ? 'text-green-700 bg-green-50 border border-green-200'
                   : 'text-red-700 bg-red-50 border border-red-200'
               }`}>
                 {(balanceDiff === null || isBalanceMatch) &&
-                 (isNaN(invoiceVariance) || isInvoiceMatch) &&
+                 !hasNotInAcumatica &&
                  (formulaDiff === null || isFormulaMatch)
                   ? <CheckCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
                   : <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />}
                 <span className="space-y-0.5">
                   {(balanceDiff === null || isBalanceMatch) &&
-                   (isNaN(invoiceVariance) || isInvoiceMatch) &&
+                   !hasNotInAcumatica &&
                    (formulaDiff === null || isFormulaMatch)
                     ? <>Statement reconciles — outstanding balance <strong>{stmtFmt(erpComputedNum)}</strong> and all invoice lines match Acumatica.</>
                     : <>
@@ -970,8 +1196,8 @@ export default function DocumentDetailPage() {
                         {!isBalanceMatch && balanceDiff !== null && (
                           <span className="block">Outstanding balance mismatch: statement <strong>{stmtFmt(outstandingStmtNum)}</strong> vs system <strong>{stmtFmt(erpComputedNum)}</strong> (diff: {stmtFmt(balanceDiff)}).</span>
                         )}
-                        {!isInvoiceMatch && !isNaN(invoiceVariance) && (
-                          <span className="block">Invoice variance of <strong>{stmtFmt(Math.abs(invoiceVariance))}</strong> between statement total debit and Acumatica{unmatchedLineCount > 0 ? ` (${unmatchedLineCount} line${unmatchedLineCount !== 1 ? 's' : ''} adjusted)` : ''}.</span>
+                        {hasNotInAcumatica && (
+                          <span className="block"><strong>{stmtFmt(totalNotInAcumatica)}</strong> across {unmatchedLineCount} invoice line{unmatchedLineCount !== 1 ? 's' : ''} could not be found in Acumatica.</span>
                         )}
                       </>
                   }
@@ -1021,15 +1247,15 @@ export default function DocumentDetailPage() {
                   }),
                   2)
               : null;
+            // For auto-flow: use flexbox so partial last rows always stretch to 100% width.
+            // flex: '1 1 calc(33.33% - gap)' gives ~3 per row; flex-grow fills any remainder.
             return (
           <dl
-            className="gap-3"
-            style={{
+            className={maxCol ? 'gap-3' : 'flex flex-wrap gap-3'}
+            style={maxCol ? {
               display: 'grid',
-              gridTemplateColumns: maxCol
-                ? `repeat(${maxCol}, minmax(0, 1fr))`
-                : 'repeat(auto-fit, minmax(160px, 1fr))',
-            }}
+              gridTemplateColumns: `repeat(${maxCol}, minmax(0, 1fr))`,
+            } : undefined}
           >
             {headerFields.map(field => {
               const cfg = fieldConfigMap[field.fieldName.toLowerCase()];
@@ -1037,7 +1263,7 @@ export default function DocumentDetailPage() {
               const isManual = cfg?.isManualEntry ?? false;
               const isLow = !isManual && (field.confidence ?? 1) < 0.7;
               const status = getValidationStatus(field.id);
-              const isPending = pendingIds.has(field.id);
+              const isPending = pendingIds.has(field.id) || backgroundPendingIds.has(field.id);
               const msgs = getValidationMsgs(field.id);
               const d = cfg?.displayOrder ?? 0;
               const explicit   = isExplicitFn(d);
@@ -1046,7 +1272,9 @@ export default function DocumentDetailPage() {
               return (
                 <div
                   key={field.id}
-                  style={gridRow !== undefined ? { gridRow, gridColumn } : undefined}
+                  style={maxCol
+                    ? (gridRow !== undefined ? { gridRow, gridColumn } : undefined)
+                    : { flex: '1 1 calc(33.33% - 0.75rem)', minWidth: '160px' }}
                   className={`rounded-lg border px-3 py-2.5 space-y-1 transition-colors ${
                     isManual            ? 'border-violet-200 bg-violet-50/50'
                     : isPending         ? 'border-blue-200 bg-blue-50/30'
@@ -1130,16 +1358,112 @@ export default function DocumentDetailPage() {
                <div className="h-full bg-primary animate-pulse w-full"></div>
             </div>
           )}
-          <div className={`p-4 border-b flex items-center justify-between ${isRunning ? 'bg-muted/20' : 'border-border'}`}>
-            <h2 className="font-semibold text-foreground flex items-center gap-2">
+          <div className={`p-4 border-b flex flex-wrap items-center gap-2 ${isRunning ? 'bg-muted/20' : 'border-border'}`}>
+            <h2 className="font-semibold text-foreground flex items-center gap-2 flex-1 min-w-0">
               Table Data
               {tableRowCount > 0 && <span className="text-sm font-normal text-muted-foreground">({tableRowCount} rows)</span>}
               {isRunning && <span className="text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full animate-pulse flex items-center gap-1.5"><Loader2 className="h-3 w-3 animate-spin"/> Validating Row by Row</span>}
             </h2>
-            <p className="text-xs text-muted-foreground flex items-center gap-1">
-              <Pencil className="h-3 w-3" /> Click to edit
-            </p>
+            <div className="flex items-center gap-2">
+              {totalTablePages > 1 && (
+                <div className="flex items-center gap-1.5">
+                  <button onClick={() => setTablePage(p => Math.max(1, p - 1))} disabled={tablePage === 1}
+                    className="px-2 py-0.5 text-xs rounded border border-border bg-background hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed">←</button>
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">Page {tablePage} of {totalTablePages}</span>
+                  <button onClick={() => setTablePage(p => Math.min(totalTablePages, p + 1))} disabled={tablePage === totalTablePages}
+                    className="px-2 py-0.5 text-xs rounded border border-border bg-background hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed">→</button>
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                <Pencil className="h-3 w-3" /> Click to edit
+              </p>
+              {!isRunning && (
+                <button
+                  onClick={runTableValidation}
+                  className="btn-secondary flex items-center gap-1.5 text-xs py-1 px-2"
+                  title="Validate table rows only"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" /> Validate Table
+                </button>
+              )}
+              <button
+                onClick={() => setShowFindReplace(v => !v)}
+                className={`btn-secondary flex items-center gap-1.5 text-xs py-1 px-2 ${showFindReplace ? 'bg-primary/10 border-primary/40' : ''}`}
+              >
+                <Replace className="h-3.5 w-3.5" /> Find &amp; Replace
+              </button>
+            </div>
           </div>
+
+          {/* Find & Replace panel */}
+          {showFindReplace && (
+            <div className="p-3 border-b border-border bg-primary/5">
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-muted-foreground font-medium">Column</label>
+                  <select
+                    value={frScope}
+                    onChange={e => setFrScope(e.target.value)}
+                    className="input text-xs h-7 pr-6 min-w-[14rem]"
+                  >
+                    <option value="__all__">All columns</option>
+                    {tableColumnNames
+                      .filter(n => !(fieldConfigMap[n.toLowerCase()]?.isCheckbox))
+                      .map(n => (
+                        <option key={n} value={n}>
+                          {fieldConfigMap[n.toLowerCase()]?.displayLabel ?? n}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-muted-foreground font-medium">Find</label>
+                  <input
+                    type="text"
+                    value={frFind}
+                    onChange={e => setFrFind(e.target.value)}
+                    placeholder="e.g. I"
+                    className="input text-xs h-7 w-28"
+                    autoFocus
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-muted-foreground font-medium">Replace with</label>
+                  <input
+                    type="text"
+                    value={frReplace}
+                    onChange={e => setFrReplace(e.target.value)}
+                    placeholder="e.g. 1"
+                    className="input text-xs h-7 w-28"
+                    onKeyDown={e => { if (e.key === 'Enter') applyFindReplace(); }}
+                  />
+                </div>
+                <button
+                  onClick={applyFindReplace}
+                  disabled={!frFind}
+                  className="btn-primary text-xs h-7 px-3 disabled:opacity-50"
+                >
+                  Replace All
+                </button>
+                <button onClick={() => setShowFindReplace(false)} className="text-muted-foreground hover:text-foreground ml-auto">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              {frFind && ocrResult && (
+                <p className="text-xs text-muted-foreground mt-2">
+                  {(() => {
+                    const count = ocrResult.fields.filter(f => {
+                      if (fieldConfigMap[f.fieldName.toLowerCase()]?.isCheckbox) return false;
+                      if (frScope !== '__all__' && f.fieldName !== frScope) return false;
+                      const v = f.isManuallyCorreected && f.correctedValue != null ? f.correctedValue : (f.normalizedValue ?? f.rawValue ?? '');
+                      return v.includes(frFind);
+                    }).length;
+                    return count === 0 ? 'No matches found.' : `${count} cell${count === 1 ? '' : 's'} will be updated.`;
+                  })()}
+                </p>
+              )}
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -1157,7 +1481,8 @@ export default function DocumentDetailPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {Array.from({ length: tableRowCount }, (_, i) => {
+                {Array.from({ length: tablePageEnd - tablePageStart }, (_, idx) => {
+                  const i = tablePageStart + idx;
                   const rowConfs = tableColumnNames
                     .map(n => tableFieldGroups[n]?.[i]?.confidence)
                     .filter((c): c is number => c !== undefined);
@@ -1169,7 +1494,7 @@ export default function DocumentDetailPage() {
                     .filter((id): id is string => !!id);
                   const rowValidations = allValidations.filter(v =>
                     v.extractedFieldId && rowFieldIds.includes(v.extractedFieldId));
-                  const rowIsPending = rowFieldIds.some(fid => pendingIds.has(fid));
+                  const rowIsPending = rowFieldIds.some(fid => pendingIds.has(fid) || backgroundPendingIds.has(fid));
                   const rowStatus = rowValidations.some(v => v.status === 'Failed') ? 'Failed'
                     : rowValidations.some(v => v.status === 'Warning') ? 'Warning'
                     : rowValidations.some(v => v.status === 'Passed') ? 'Passed'
@@ -1182,8 +1507,26 @@ export default function DocumentDetailPage() {
                   const warningV = rowValidations.find(v => v.status === 'Warning');
                   const isSettled = rowFieldIds.some(id => settledFieldIds.has(id));
                   return (
-                    <tr key={i} className={`hover:bg-muted/30 transition-opacity ${isSettled ? 'opacity-50' : ''} ${avgConf < 0.7 && !isSettled ? 'bg-red-50/50' : ''}`}>
-                      <td className="px-3 py-2 text-center text-muted-foreground">{i + 1}</td>
+                    <tr key={i} className={`group hover:bg-muted/30 transition-opacity ${isSettled ? 'opacity-50' : ''} ${avgConf < 0.7 && !isSettled ? 'bg-red-50/50' : ''}`}>
+                      <td className="px-3 py-2 text-center text-muted-foreground w-8">
+                        {rowIsPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500 mx-auto" />
+                        ) : (
+                          <>
+                            <span className="group-hover:hidden">{i + 1}</span>
+                            <button
+                              onClick={e => {
+                                e.stopPropagation();
+                                validateRow(rowFieldIds);
+                              }}
+                              className="hidden group-hover:inline-flex items-center justify-center text-blue-500 hover:text-blue-700 transition-colors"
+                              title="Validate this row"
+                            >
+                              <RefreshCw className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        )}
+                      </td>
                       {tableColumnNames.map(name => {
                         const cellField = tableFieldGroups[name]?.[i];
                         const cellCfg = fieldConfigMap[name.toLowerCase()];
@@ -1210,11 +1553,21 @@ export default function DocumentDetailPage() {
                         }
 
                         const cellStatus = cellField ? getValidationStatus(cellField.id) : null;
-                        const cellPending = cellField ? pendingIds.has(cellField.id) : false;
+                        const cellPending = cellField ? (pendingIds.has(cellField.id) || backgroundPendingIds.has(cellField.id)) : false;
+                        const isCreditCol = /credit|payment/i.test(name);
+                        const debitColName = isCreditCol
+                          ? tableColumnNames.find(n => /amount|debit/i.test(n) && !/credit|payment/i.test(n))
+                          : undefined;
+                        const debitField = debitColName ? tableFieldGroups[debitColName]?.[i] : undefined;
+                        const debitValue = debitField
+                          ? (debitField.isManuallyCorreected && debitField.correctedValue != null
+                              ? debitField.correctedValue
+                              : (debitField.normalizedValue ?? debitField.rawValue ?? ''))
+                          : '';
                         return (
                           <td
                             key={name}
-                            className={`px-3 py-2 transition-colors ${
+                            className={`px-3 py-2 transition-colors group/cell ${
                               cellPending      ? 'bg-muted/30'
                               : cellStatus === 'Failed'  ? 'bg-red-100/80 border-b border-red-300'
                               : cellStatus === 'Warning' ? 'bg-amber-50/80 border-b border-amber-200'
@@ -1222,7 +1575,21 @@ export default function DocumentDetailPage() {
                               : ''
                             }`}
                           >
-                            <EditableCell field={cellField} onSave={save} placeholder="—" />
+                            <div className="flex items-center gap-1">
+                              <EditableCell field={cellField} onSave={save} placeholder="—" />
+                              {isCreditCol && cellField && debitField && debitValue && (
+                                <button
+                                  onClick={e => { e.stopPropagation(); save(cellField.id, debitValue); }}
+                                  title={`Mirror debit amount: ${debitValue}`}
+                                  className="flex-shrink-0 p-0.5 rounded text-blue-500 hover:bg-blue-50 hover:text-blue-700 opacity-0 group-hover/cell:opacity-100 transition-opacity"
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                                  </svg>
+                                </button>
+                              )}
+                            </div>
                           </td>
                         );
                       })}
@@ -1253,39 +1620,63 @@ export default function DocumentDetailPage() {
               </tbody>
             </table>
           </div>
+          {totalTablePages > 1 && (
+            <div className="border-t border-border px-4 py-2 flex items-center justify-between bg-muted/20">
+              <span className="text-xs text-muted-foreground">Rows {tablePageStart + 1}–{tablePageEnd} of {tableRowCount}</span>
+              <div className="flex items-center gap-1.5">
+                <button onClick={() => setTablePage(p => Math.max(1, p - 1))} disabled={tablePage === 1}
+                  className="px-2 py-0.5 text-xs rounded border border-border bg-background hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed">← Prev</button>
+                <span className="text-xs text-muted-foreground whitespace-nowrap">Page {tablePage} of {totalTablePages}</span>
+                <button onClick={() => setTablePage(p => Math.min(totalTablePages, p + 1))} disabled={tablePage === totalTablePages}
+                  className="px-2 py-0.5 text-xs rounded border border-border bg-background hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed">Next →</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* ── Admin: PaddleOCR raw extracted text ─────────────────────── */}
-      {isAdmin && ocrResult?.rawText && ocrResult.fields.length > 0 && (
+      {/* ── PaddleOCR raw extracted text ─────────────────────── */}
+      {ocrResult?.rawText && ocrResult.fields.length > 0 && (
         <div className="card p-5 space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="font-semibold text-foreground flex items-center gap-2">
               <FileText className="h-4 w-4" /> PaddleOCR Raw Text
-              <span className="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">Admin</span>
             </h2>
-            <button
-              className="btn-secondary flex items-center gap-1.5 text-xs"
-              disabled={paddleRawRunning}
-              onClick={async () => {
-                setPaddleRawRunning(true);
-                setPaddleRawText(null);
-                try {
-                  const res = await ocrApi.runPaddleRaw(id!);
-                  setPaddleRawText((res.data as { rawText: string }).rawText);
-                } finally {
-                  setPaddleRawRunning(false);
-                }
-              }}
-              title="Re-run only PaddleOCR engine and show the fresh raw text output"
-            >
-              {paddleRawRunning
-                ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Running…</>
-                : <><RefreshCw className="h-3.5 w-3.5" /> Re-run PaddleOCR</>}
-            </button>
+            <div className="flex items-center gap-2">
+              {doc.documentTypeId && !['PendingProcess', 'Processing'].includes(doc.status) && (
+                <button
+                  onClick={() => reExtract.mutate()}
+                  disabled={reExtract.isPending}
+                  className="btn-secondary flex items-center gap-1.5 text-xs"
+                  title="Re-run field extraction on the existing raw text (no OCR re-scan)"
+                >
+                  {reExtract.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                  Re-extract Fields
+                </button>
+              )}
+              <button
+                className="btn-secondary flex items-center gap-1.5 text-xs"
+                disabled={paddleRawRunning}
+                onClick={async () => {
+                  setPaddleRawRunning(true);
+                  setPaddleRawText(null);
+                  try {
+                    const res = await ocrApi.runPaddleRaw(id!);
+                    setPaddleRawText((res.data as { rawText: string }).rawText);
+                  } finally {
+                    setPaddleRawRunning(false);
+                  }
+                }}
+                title="Re-run only PaddleOCR engine and show the fresh raw text output"
+              >
+                {paddleRawRunning
+                  ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Running…</>
+                  : <><RefreshCw className="h-3.5 w-3.5" /> Re-run PaddleOCR</>}
+              </button>
+            </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            Full text extracted by PaddleOCR before field parsing. Use this to verify OCR accuracy. Click <strong>Re-run PaddleOCR</strong> to refresh only the raw text without re-extracting fields.
+            Full text extracted by PaddleOCR before field parsing. Use this to verify OCR accuracy. Click <strong>Re-extract Fields</strong> to re-run field extraction without re-scanning, or <strong>Re-run PaddleOCR</strong> to refresh only the raw text.
           </p>
           <pre className="text-xs text-foreground bg-muted border border-border rounded p-3 whitespace-pre-wrap break-words max-h-80 overflow-auto font-mono leading-relaxed">
             {paddleRawText ?? ocrResult.rawText}
@@ -1302,14 +1693,27 @@ export default function DocumentDetailPage() {
       {/* ── Raw text fallback — shown when OCR ran but no structured fields extracted ── */}
       {ocrResult && ocrResult.fields.length === 0 && ocrResult.rawText && (
         <div className="card p-5 space-y-3">
-          <h2 className="font-semibold text-foreground flex items-center gap-2">
-            <FileText className="h-4 w-4" /> Raw OCR Text
-          </h2>
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-foreground flex items-center gap-2">
+              <FileText className="h-4 w-4" /> Raw OCR Text
+            </h2>
+            {doc.documentTypeId && !['PendingProcess', 'Processing'].includes(doc.status) && (
+              <button
+                onClick={() => reExtract.mutate()}
+                disabled={reExtract.isPending}
+                className="btn-secondary flex items-center gap-1.5 text-xs"
+                title="Re-run field extraction on the existing raw text (no OCR re-scan)"
+              >
+                {reExtract.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                Re-extract Fields
+              </button>
+            )}
+          </div>
           <p className="text-xs text-amber-600">
             No structured fields were extracted.
             {!doc.documentTypeId
-              ? ' Assign a document type above and re-run OCR to extract fields.'
-              : ' Re-run OCR to retry extraction.'}
+              ? ' Assign a document type above, then click Re-extract Fields.'
+              : ' Click Re-extract Fields to retry without re-scanning the document.'}
           </p>
           <pre className="text-xs text-foreground bg-muted border border-border rounded p-3 whitespace-pre-wrap break-words max-h-96 overflow-auto">
             {ocrResult.rawText}
@@ -1357,6 +1761,17 @@ export default function DocumentDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Back to top ─────────────────────────────────────────────────── */}
+      {showBackToTop && (
+        <button
+          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+          className="fixed bottom-6 right-6 z-50 p-2.5 rounded-full bg-primary text-primary-foreground shadow-lg hover:bg-primary/90 transition-all"
+          title="Back to top"
+        >
+          <ArrowUp className="h-4 w-4" />
+        </button>
       )}
     </div>
   );

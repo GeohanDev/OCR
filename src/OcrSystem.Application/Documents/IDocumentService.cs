@@ -29,4 +29,6 @@ public record DocumentListQuery(
     int Page = 1,
     int PageSize = 20,
     Guid? VendorId = null,
-    Guid? DocumentTypeId = null);
+    Guid? DocumentTypeId = null,
+    string? VendorName = null,
+    Guid? FilterBranchId = null);

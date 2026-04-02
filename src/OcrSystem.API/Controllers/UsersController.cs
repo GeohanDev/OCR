@@ -18,12 +18,15 @@ public class UsersController : ControllerBase
     private readonly IAuditService _audit;
     private readonly ICurrentUserContext _user;
 
-    public UsersController(IUserSyncService syncService, UserRepository userRepo, IAuditService audit, ICurrentUserContext user)
+    private readonly DocumentRepository _docRepo;
+
+    public UsersController(IUserSyncService syncService, UserRepository userRepo, IAuditService audit, ICurrentUserContext user, DocumentRepository docRepo)
     {
         _syncService = syncService;
         _userRepo = userRepo;
         _audit = audit;
         _user = user;
+        _docRepo = docRepo;
     }
 
     [HttpPost("sync")]
@@ -86,7 +89,22 @@ public class UsersController : ControllerBase
         await _userRepo.UpdateAsync(user, ct);
         return NoContent();
     }
+
+    [HttpPatch("{id:guid}/branch")]
+    [Authorize(Policy = "AdminOnly")]
+    public async Task<IActionResult> UpdateBranch(Guid id, [FromBody] UpdateBranchRequest request, CancellationToken ct)
+    {
+        var user = await _userRepo.GetByIdAsync(id, ct);
+        if (user is null) return NotFound();
+        user.BranchId = request.BranchId;
+        user.UpdatedAt = DateTimeOffset.UtcNow;
+        await _userRepo.UpdateAsync(user, ct);
+        // Propagate new branch to all this user's documents that have no branch yet.
+        await _docRepo.UpdateBranchForUserAsync(id, request.BranchId, ct);
+        return NoContent();
+    }
 }
 
 public record UpdateRoleRequest(string Role);
 public record UpdateActiveRequest(bool IsActive);
+public record UpdateBranchRequest(Guid? BranchId);
